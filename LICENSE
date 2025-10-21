@@ -1,8 +1,37 @@
-MIT License
+Composite License Notice
+-------------------------
 
 Copyright (c) 2025 Taisei Kuwana,
 Master's Student (M1), Graduate School of Engineering,
 Nagoya Institute of Technology, Japan
+
+This software is primarily licensed under the terms of the MIT License
+(except where otherwise noted below).
+
+---
+
+Portion under Non-Commercial Research License
+---------------------------------------------
+
+A small portion of this code (around 30 lines) was adapted from the official
+Gaussian Splatting implementation
+(https://github.com/graphdeco-inria/gaussian-splatting).
+
+That portion is subject to the "Gaussian-Splatting License" and is owned by
+Inria and the Max Planck Institute for Informatics (MPII).
+
+Accordingly, **only that adapted portion** may be used, reproduced, modified,
+and distributed **for research and educational purposes only**.
+Commercial use or redistribution for profit of that portion is **strictly
+prohibited** without prior written permission from Inria or MPII.
+
+---
+
+All Other Portions
+------------------
+
+All other parts of this software are © 2025 Taisei Kuwana
+and are licensed under the **MIT License**:
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -14,13 +43,10 @@ furnished to do so, subject to the following conditions:
 The above copyright notice and this permission notice shall be included in
 all copies or substantial portions of the Software.
 
----
-
-### Additional Notice
-
-A small portion of the code (around 30 lines) was adapted from the official
-Gaussian Splatting implementation
-(https://github.com/graphdeco-inria/gaussian-splatting, MIT License).
-
-The adapted portion remains under the terms of the MIT License,
-and full credit is hereby given to the original authors (INRIA).
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.

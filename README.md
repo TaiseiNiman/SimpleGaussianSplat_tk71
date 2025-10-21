@@ -1,3 +1,5 @@
+まだ完成しておりません.
+
 ## License
 This project is licensed under the MIT License.  
 Please include the following credit when redistributing or modifying:

@@ -93,13 +93,17 @@ class Control():
             self.reset_opacity_min = input("リセットする不透明度の値(標準0.01):") or self.reset_opacity_min if self.mode != True else self.reset_opacity_min
             #モデルインスタンス作成
             self.GS_model_param = GS_model_with_param(self.gaus_mean,self.variance_q,self.variance_scale,self.gaus_point_o,self.grad_delta_upper_limit)
+            #データセットのインスタンス作成
+            self.GS_dataset = GS_dataset(P,K,wh,image_samples)
+            #カメラの平均距離から最も遠いカメラの距離
+            self.camera_extent = self.GS_dataset.get_camera_extent()
             #イテレーション開始
             learning_numbers_per_epoch = self.learning_numbers / self.image_samples.shape[0] #１エポックあたりの学習回数
             
             for iter_i in iter(torch.arange(round(learning_numbers_per_epoch))):
                 #
                 it = DataLoader(
-                GS_dataset(P,K,wh,image_samples),   # Datasetのインスタンス
+                self.GS_dataset,   # Datasetのインスタンス
                 batch_size=self.batch_size,     # バッチサイズ（1回に取り出すデータ数）
                 shuffle=True,      # データのシャッフル（エポックごと）
                 num_workers=2,     # 並列でデータをロードするスレッド数
@@ -111,15 +115,21 @@ class Control():
                     #損失関数を計算
                     loss_d_ssim =  1 - metrics.ssim(model_images, it_image_sample, max_val=1.0, window_size=11).mean()
                     loss_1 = torch.nn.functional.l1_loss(model_images, it_image_sample, reduction='mean')
-                    self.GS_model_param.train_step((1-self.loss_lamda) * loss_1 + self.loss_lamda * loss_d_ssim)
+                    loss = (1-self.loss_lamda) * loss_1 + self.loss_lamda * loss_d_ssim
+                    #自動微分による勾配計算
+                    self.GS_model_param.backward(loss)
+                    #ガウス分布の位置の勾配値の積算回数の更新
+                    self.GS_model_param.param_iter_update()
+                    #確率的勾配降下法によって最適化
+                    self.GS_model_param.train_step()
                     #ガウシアンの複製・分割・削除と不透明度のリセットを行う
                     # イテレーション数を計算
                     iteration = iter_i * math.Ceil(self.image_samples.shape[0] / self.batch_size) + batch_i + 1
                     if iteration <= self.densify_until_iter:
-                        #
-
+                        
                         if iteration >= self.densify_from_iter and (iteration - self.densify_from_iter) % self.densification_interval == 0:
-                            self.GS_model_param.densify_and_clone(it.get_camera_extent())
+                            self.GS_model_param.densify_and_clone(self.camera_extent)
+                            self.GS_model_param.densify_and_prune(self.camera_extent)
                         
                         if (iteration - self.densify_from_iter) % (self.opacity_reset_interval_per_densification or math.nan) == 0 or iteration == self.densify_from_iter:
                             self.GS_model_param.opacity = torch.sigmoid_(self.reset_opacity_min)
@@ -143,7 +153,13 @@ class GS_dataset(torch.utils.data.Dataset):
     def __getitem__(self):
         return [self.P, self.K, self.wh, self.image_sample]
     def get_camera_extent(self): #カメラの平均位置から最も遠い位置のカメラとの距離を求める
-        return 0
+        #カメラの並進ベクトルを取り出す
+        camera_T = self.P[:,:,3]
+        #カメラの平均位置
+        camera_mean = torch.mean(camera_T,dim=0)
+        #計算
+        camera_max = torch.max((camera_mean[None,:] - camera_T).norm(dim=1)).values
+        return camera_max
 
 #入力と出力のテンソルのshapeを必ず同じ形にする
 class Utilities():
@@ -229,7 +245,11 @@ class Utilities():
         return np.array(sh_values).reshape(d0,-1,d1) #(基底関数,画像,ガウス)→(画像,基底関数,ガウス)
 
 #学習モデルとパラメータモデル 
-class GS_model(torch.Module):
+class _GS_model(torch.Module):
+    #GS_model_with_paramのみ利用可能.
+    def __init__(self,caller=None):#callerはキーワード引数
+        if not isinstance(caller,GS_model_with_param):
+            raise PermissionError("GS_model_with_paramのみ利用可能です.")
     #optimizerの変更
     def changing_optimizer(self,lr): #lrはテンソル
         self._optimizer = torch.optim.SGD(self.parameters(recurse=False), lr=lr)
@@ -240,61 +260,57 @@ class GS_model(torch.Module):
     #パラメータのgradを一括でリセット
     def reset_grad(self):
         self._optimizer.zero_grad(set_to_none=True)
+    #勾配計算
+    def backward(self, loss):
+        #パラメーターの勾配計算オン
+        self.changing_required_grad(True)
+        #勾配計算
+        loss.backward()
+        #パラメーターの勾配計算オフ
+        self.changing_required_grad(False)
+        return self
     #パラメータあるいはスーパーパラメータあるいはウルトラパラメータの最適化
-    def train_step(self, loss, count_param):
-            loss.backward()
-            temp = torch.clone(self[count_param].grad)
-            self[count_param].grad -= self["__"+count_param+"_grad_before_one"]
-            self._optimizer.step()
-            self[count_param].grad = temp
-            self.param_iter_update(count_param)
-            self._optimizer.zero_grad(seto_to_none=False)
-            return self
-    #パラメータのgradの回数の更新を行う
-    def param_iter_update(self,parameter_names):
-        p = self.named_parameters(recurse=False)
-        for name,key in iter(p) :
-            if key.grad != None and name in parameter_names :
-                grads_delta_norm = key.grad.norm(dim=1) - self["__"+name+"_grads_before_one"].norm(dim=1) if self[name+"_grads_before_one"] != None else key.grad.norm(dim=1)
-                mask_norm = (grads_delta_norm > self.grad_delta_upper_limit)
-                self["__"+name+"_grads_iter"] = self["__"+name+"_grads_iter"] + mask_norm.int() if self["__"+name+"_grads_iter"] != None else mask_norm.int()
-                self["__"+name+"_grads_before_one"] = key.grad
-    #パラメータのgradの積算の平均値のノルムを計算
-    def param_grads_per_iter_norm(self,param_name): #param_name = パラメータ名
-        #
-        return (self[param_name] / self["__"+param_name+"_grads_iter"][:,None]).norm(dim=1)[:,None]
+    def train_step(self):
+        self._optimizer.step()
+        self.reset_grad()
+        return self
         
         
-class GS_model_with_ultra_param(GS_model):
-    def __init__(self, grad_delta_upper_limit,grad_threshold,percent_dense,lr=0.1):
+class _GS_model_with_ultra_param(_GS_model):
+    def __init__(self, grad_delta_upper_limit,grad_threshold,percent_dense,lr=0.1, caller=None):
+        #GS_model_with_paramのみ利用しないとエラーが出る.
+        super().__init__(caller)
         self.grad_delta_upper_limit = torch.Parameter(grad_delta_upper_limit)
         self.grad_threshold = torch.Parameter(grad_threshold)
         self.percent_dense = torch.Parameter(percent_dense)
         self._optimizer = self.changing_optimizer(lr)
-        #安全のために最初は勾配計算されないように設定
+        #最初は勾配計算されないように設定
         self.changing_required_grad(False)
 
 
-class GS_model_with_super_param(GS_model):
-    def __init__(self, mean_lr, others_lr,prunning_min_opacity, lr=0.1):
+class _GS_model_with_super_param(_GS_model):
+    def __init__(self, mean_lr, others_lr,prunning_min_opacity, lr=0.1, caller=None):
+        #GS_model_with_paramのみ利用しないとエラーが出る.
+        super().__init__(caller)
         #self.mean_lr = torch.Parameter(mean_lr)
         #self.others_lr = torch.Parameter(others_lr)
         self.prunning_min_opacity = prunning_min_opacity
         self._optimizer = self.changing_optimizer(lr)
-        #安全のために最初は勾配計算されないように設定
+        #最初は勾配計算されないように設定
         self.changing_required_grad(False)
 
 
 #コンポジションモデル,ウルトラ及びスーパーパラメータクラスをコンポジションで継承
-class GS_model_with_param(GS_model):
+class GS_model_with_param(_GS_model):
     # mean -> (ガウス数,3(x,y,zの順))
     # variance_q -> (ガウス数,4(i,j,k,wの順))
     # variance_scale -> (ガウス数,3)
     # opacity -> (ガウス数,1)
     # color -> (ガウス数,基底関数の数,3(x,y,zの順))
-    def __init__(self, mean, variance_q, variance_scale, opacity, grad_delta_upper_limit,grad_threshold,percent_dense, c_00=1.77, L_max=3, lr=0.1):
-        self.ultra = GS_model_with_ultra_param(grad_delta_upper_limit,grad_threshold,percent_dense)
-        self.super = GS_model_with_super_param(lr,lr)
+    def __init__(self, mean, variance_q, variance_scale, opacity, grad_delta_upper_limit,grad_threshold,percent_dense,prunning_min_opacity, c_00=1.77, L_max=3, lr=0.1):
+        #インスタンスをはじく
+        self.ultra = _GS_model_with_ultra_param(grad_delta_upper_limit,grad_threshold,percent_dense,caller=self)
+        self.super = _GS_model_with_super_param(lr,lr,prunning_min_opacity,caller=self)
         self.mean = torch.Parameter(mean)
         self.variance_q = torch.Parameter(variance_q)
         self.variance_scale = torch.Parameter(variance_scale)
@@ -303,8 +319,12 @@ class GS_model_with_param(GS_model):
         self.color = torch.Parameter(torch.zeros(self.mean.size(0),(L_max+1)**2,3))
         self.color[:,0,:] = c_00 #ベース色のみ中間色に設定
         self._optimizer = self.changing_optimizer(lr)
-        #
         self._L_max = L_max
+        #パラメーターとして使用しないローカル変数
+        self.mean_grads_norm = torch.zeros(self.mean.shape[0])
+        self.mean_grads_iter = torch.clone(self.mean_grads_norm)
+        #勾配計算されないように設定
+        self.changing_required_grad(False)
         
     # def densify_and_split(self, grads_param_name, scene_extent, N=2):
     #     n_init_points = self.mean.shape[0]
@@ -313,10 +333,28 @@ class GS_model_with_param(GS_model):
     #     selected_pts_mask = torch.where(self.param_grads_per_iter_norm(grads_param_name) >= self.ultra.grad_threshold, True, False)
     #     selected_pts_mask = torch.logical_and(selected_pts_mask,
     #                                           torch.max(torch.exp(self.variance_scale), dim=1).values > self.ultra.percent_dense*scene_extent)
-
-    def densify_and_clone(self, grads_param_name, scene_extent):
+    
+    #パラメータのgradの回数の更新を行う
+    #これは厳密には正しくない実装である.
+    #なぜならば,損失関数にパラメーターテンソルの特定の成分が含まれていない場合,それに対応する勾配テンソルの成分には0が代入されるからである.
+    #それに対して,勾配値が非常に小さな値つまりアンダーフローする場合は浮動小数点数のように最小正規化数が代入されるのではなくflush to zeroつまり0が代入される.
+    #この両者を区別できないので,実際は非常に小さな勾配値が計算されたつまりその成分は損失関数の経路に存在していたにもかかわらず,勾配積算値の積算回数に含まれないことになる.
+    #しかしながら,非常に小さな勾配値自体は勾配値を積算するときに無視できるはずだから,積算回数だけ減らされることになり本当の勾配値積算値の平均と同じかそれより大きくなり
+    #ガウス分布の複製・分割をする方向に作用するので,計算が増加するが学習品質には影響を及ぼさないはずである.
+    def param_iter_update(self):
+        if self.mean.grad != None:
+            grads_norm = self.mean.grad.norm(dim=1)
+            self.mean_grads_norm += grads_norm
+            self.mean_grads_iter += (grads_norm != 0).int()
+    #パラメータのgradの積算の平均値のノルムを計算
+    def param_grads_per_iter_norm(self): #param_name = パラメータ名
+        #積算回数が0の成分のみ1に置き換える
+        grads_iter = self.mean_grads_iter + (self.mean_grads_iter == 0).int()
+        return self.mean_grad_norm / grads_iter
+    
+    def densify_and_clone(self, scene_extent):
         # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(self.param_grads_per_iter_norm(grads_param_name) >= self.ultra.grad_threshold, True, False)
+        selected_pts_mask = torch.where(self.param_grads_per_iter_norm() >= self.ultra.grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(torch.exp_(self.variance_scale), dim=1).values > self.ultra.percent_dense*scene_extent)
         
@@ -340,8 +378,6 @@ class GS_model_with_param(GS_model):
         self.variance_scale = self.variance_scale[prune_mask == False]
         self.opacity = self.opacity[prune_mask == False]
         self.color = self.color[prune_mask == False]
-
-        torch.cuda.empty_cache()
     
     # P -> (画像数,3,4)
     # K -> (画像数,3,3)

@@ -5,7 +5,7 @@
 #  Nagoya Institute of Technology, Japan, cmk14002@ict.nitech.ac.jp
 #  Licensed under the MIT License.
 # ================================================================
-from gs_module import Control
+from gs_control import Control
 
 #メイン関数の定義
 class Program():

@@ -10,7 +10,8 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "python": "C:\\Users\\tk71\\Downloads\\SimpleGaussianSplat_tk71\\venv\\Scripts\\python.exe"   
         }
     ]
 }

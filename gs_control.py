@@ -94,7 +94,7 @@ class Control():
                     #ガウシアンスプラッティングによる画像の出力
                     model_images = self.GS_model_param(it_P,it_K,it_wh)
                     #画像パスから学習画像をgpuメモリに配置
-                    images_tensor = torch.empty((0,3,it_wh[0,1],it_wh[0,0]))
+                    images_tensor = torch.empty((0,3,it_wh[0,1].to(torch.int32).item(),it_wh[0,0].to(torch.int32).item()))
                     for img in it_image_sample:
                         image_tensor = Image_to_transform(root_dir,img).convert_to_torch_tensor()[None,:,:,:]
                         images_tensor = torch.cat((images_tensor,image_tensor),dim=0)

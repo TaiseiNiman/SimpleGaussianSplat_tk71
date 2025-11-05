@@ -474,3 +474,85 @@ class Utilities():
         _, counts = torch.unique(group_id, return_counts=True)
         return counts
     
+
+    def render_gaussian_batch(
+        mean_pixel_zsort, gausian_boxsize_zsort,
+        L_d_zsort, opacity_zsort, variance_inverse_zsort,
+        shape_width, shape_height
+    ):
+        pixel_image_batch = []
+
+        for batch_i in range(mean_pixel_zsort.shape[0]):  # ← バッチ単位は必要
+            # ---------- (1) マスク ----------
+            gx = gausian_boxsize_zsort[batch_i, :, 0]
+            gy = gausian_boxsize_zsort[batch_i, :, 1]
+            mx = mean_pixel_zsort[batch_i, :, 0]
+            my = mean_pixel_zsort[batch_i, :, 1]
+
+            mask = (
+                (gx != 0)
+                & (mx - gx < shape_width)
+                & (mx + gx > 0)
+                & (my - gy < shape_height)
+                & (my + gy > 0)
+            )
+
+            mean_pixel_batch = mean_pixel_zsort[batch_i][mask]
+            gausian_boxsize = gausian_boxsize_zsort[batch_i][mask]
+            L_d_batch = L_d_zsort[batch_i][mask]
+            opacity_batch = opacity_zsort[batch_i][mask]
+            variance_inv_batch = variance_inverse_zsort[batch_i][mask]
+
+            # ---------- (2) start/end点 ----------
+            box_start = torch.clamp(mean_pixel_batch - gausian_boxsize, min=0)
+            box_end   = torch.clamp(mean_pixel_batch + gausian_boxsize, max=torch.tensor([shape_width, shape_height], device=mean_pixel_batch.device))
+            box_wh    = (box_end - box_start + 1).to(torch.int32)
+            box_sizes = torch.prod(box_wh, dim=1)
+
+            # ---------- (3) rect座標生成（ベクトル化） ----------
+            # 各ガウスの長方形範囲を展開する
+            # 例: box_start[i]=[x0,y0], box_wh[i]=[w,h]
+            # → rect = [x0+ix, y0+iy] for ix∈[0,w), iy∈[0,h)
+            x_offsets = torch.arange(box_wh[:, 0].max(), device=box_wh.device)
+            y_offsets = torch.arange(box_wh[:, 1].max(), device=box_wh.device)
+            grid_x, grid_y = torch.meshgrid(x_offsets, y_offsets, indexing="xy")
+            grid = torch.stack([grid_x, grid_y], dim=-1)  # (Wx, Wy, 2)
+
+            # 長方形ごとにmask化
+            mask_x = (x_offsets[None, :] < box_wh[:, 0, None])
+            mask_y = (y_offsets[None, :] < box_wh[:, 1, None])
+            mask2d = mask_x[:, :, None] & mask_y[:, None, :]
+            rects = (box_start[:, None, None, :] + grid[None, :, :, :])
+            rects = rects[mask2d].view(-1, 2)  # (Σ w_i*h_i, 2)
+
+            # ---------- (4) ベクトル化ガウスカーネル計算 ----------
+            # 各ガウスに属するpixelのインデックス
+            group_ids = torch.repeat_interleave(
+                torch.arange(len(box_sizes), device=rects.device), box_sizes
+            )
+            diff = rects - mean_pixel_batch[group_ids]
+            diff = diff.unsqueeze(1)  # (N,1,2)
+            var = variance_inv_batch[group_ids]  # (N,2,2)
+            tmp = torch.bmm(diff, var)           # (N,1,2)
+            G = torch.exp(-0.5 * (tmp * diff).sum(dim=(1,2), keepdim=True))  # (N,1)
+
+            # ---------- (5) 不透明度合成 ----------
+            op = opacity_batch[group_ids]
+            Ld = L_d_batch[group_ids]
+            unti = 1 - op * G.squeeze()
+            keys = rects[:,0] * (shape_width+1) + rects[:,1]
+            T0 = Utilities.grouped_cumprod(unti, keys) / unti.clamp(min=1e-8)
+
+            pixel_batch = T0[:,None] * Ld * op * G
+
+            # ---------- (6) scatter加算 ----------
+            pixel_img = torch.zeros((shape_height+1, shape_width+1, 3), device=rects.device)
+            pixel_img.index_put_(
+                (rects[:,1].long(), rects[:,0].long()),
+                pixel_batch,
+                accumulate=True
+            )
+
+            pixel_image_batch.append(pixel_img)
+
+        return torch.stack(pixel_image_batch, dim=0)

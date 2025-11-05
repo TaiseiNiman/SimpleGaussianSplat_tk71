@@ -75,7 +75,7 @@ class _GS_model_with_ultra_param(_GS_model):
         self.grad_delta_upper_limit = torch.nn.Parameter(torch.tensor(grad_delta_upper_limit,device="cuda",dtype=torch.float32))
         self.grad_threshold = torch.nn.Parameter(torch.tensor(grad_threshold,device="cuda",dtype=torch.float32))
         self.percent_dense = torch.nn.Parameter(torch.tensor(percent_dense,device="cuda",dtype=torch.float32))
-        self.variance_pixel_tile_max_width = torch.nn.Parameter(torch.tensor(torch.logit(variance_pixel_tile_max_width),device="cuda",dtype=torch.float32))
+        self.variance_pixel_tile_max_width = torch.nn.Parameter(torch.logit(torch.tensor(variance_pixel_tile_max_width,device="cuda",dtype=torch.float32)))
         self.changing_optimizer(lr)
         #最初は勾配計算されないように設定
         self.changing_required_grad(False)
@@ -179,8 +179,12 @@ class GS_model_with_param(_GS_model):
     # wh -> (画像数,2(width,heightの順))
     def forward(self, P, K, wh):#input = 入力, super_param = 超パラメータ
         #shape_image = 画像数, shape_gausian = ガウス分布の数
-        shape_gausian, shape_image, shape_wh, shape_width, shape_height = [self.mean.shape[0], P.shape[0], wh[0,0]*wh[0,1], wh[0,0], wh[0,1]]
-
+        shape_gausian, shape_image, shape_wh, shape_width, shape_height = [self.mean.shape[0], P.shape[0], (wh[0,0]*wh[0,1]).to(torch.int32), wh[0,0].to(torch.int32), wh[0,1].to(torch.int32)]
+        #オーバーフロー及びアンダーフロー
+        float32_max = torch.finfo(torch.float32).max
+        float32_min = torch.finfo(torch.float32).min
+        int32_max = torch.iinfo(torch.int32).max
+        int32_min = torch.iinfo(torch.int32).min
         #ガウス位置のカメラ座標mean_cameraを計算.←ガウスの位置meanをカメラ座標系に座標変換
         m1, P1 = [shape_gausian,shape_image]
         Utilities.gpu_mem()
@@ -226,7 +230,7 @@ class GS_model_with_param(_GS_model):
         # J[:,:,1,2] = -K[:,None,:,:][:,:,1,2] * mean_camera[:,:,None,:][:,:,0,1] / (mean_camera[:,:,None,:][:,:,0,2][mean_camera!=0]**2)
         #共分散行列をピクセル座標系へ変換(線形近似)
         # variance_pixel -> (画像数,ガウス数,2,2)
-        variance_pixel = J @ variance_camera @ torch.transpose(J,2,3)
+        variance_pixel = (J @ variance_camera @ torch.transpose(J,2,3)).clamp(max=float32_max/1000,min=float32_min/1000)
         #J[:,None,:,:] @ variance_camera[None,:,:,:] @ torch.transpose(J,(0,2,1))[:,None,:,:]
         Utilities.gpu_mem()
         #共分散行列を固有値分解
@@ -259,80 +263,86 @@ class GS_model_with_param(_GS_model):
         
         #ピクセル値算出のためにzソート
         z_index = torch.argsort(mean_camera[:,:,2],dim=1)
-        image_index = torch.arange(shape_image)[:,None]
-        #
-        mean_camera_zsort = mean_camera[image_index,z_index,:]
-        #
+        image_index = torch.arange(shape_image)[:,None]        
         opacity_zsort = torch.sigmoid_(self.opacity).unsqueeze(0).repeat(shape_image,1,1)[image_index,z_index,:]
-        mean_pixel_zsort = mean_pixel[image_index,z_index,:]
+        mean_pixel_zsort = mean_pixel[image_index,z_index,:].clamp(max=int32_max/1000,min=int32_min/1000).to(torch.int32)
         variance_inverse_zsort = variance_inverse[image_index,z_index,:]
         L_d_zsort = L_d[image_index,z_index,:]
-        gausian_boxsize_zsort = gausian_boxsize[image_index,z_index,:]
+        ptile_maxwidth = torch.sqrt(shape_wh)*torch.sigmoid(self.ultra.variance_pixel_tile_max_width)
+        gausian_boxsize_zsort = gausian_boxsize[image_index,z_index,:].clamp(max=ptile_maxwidth/2).to(torch.int32)
         print(f"opacity.shape = {opacity_zsort.shape}")
         print(f"mean_pixel_zsort.shape = {mean_pixel_zsort.shape}")
         print(f"variance_inverse_zsort.shape = {variance_inverse_zsort.shape}")
         print(f"L_d_zsortity.shape = {L_d_zsort.shape}")
         print(f"gausian_boxsize_zsort.shape = {gausian_boxsize_zsort.shape}")
         
+    #     test = Utilities.render_gaussian_batch(
+    #     mean_pixel_zsort, gausian_boxsize_zsort,
+    #     L_d_zsort, opacity_zsort, variance_inverse_zsort,
+    #     shape_width, shape_height
+    # )
+        
         Utilities.gpu_mem()
         pixel_image_batch =[]
-        ptile_maxwidth = torch.sqrt(shape_wh)*torch.sigmoid(self.variance_pixel_tile_max_width)
         for batch_i in range(shape_image):
             #
             pixel_gausian_batch = []
             index = 0
-            #画像に映らないガウシアンを取り除く
-            gausian_boxsize_batch = gausian_boxsize_zsort[batch_i,:,:]
-            box_startpoint_x = (mean_pixel_zsort[batch_i,:,:][:,0] - gausian_boxsize_batch[:,0]).clamp(max=shape_width,min=0)
-            box_startpoint_y = (mean_pixel_zsort[batch_i,:,:][:,1] - gausian_boxsize_batch[:,1]).clamp(max=shape_height,min=0)
+            #ガウシアンボックス幅が０となるガウシアンを取り除く
+            boxsize_mask = (gausian_boxsize_zsort[batch_i, :, 0] != 0) & (mean_pixel_zsort[batch_i,:,0] - gausian_boxsize_zsort[batch_i, :, 0] < shape_width) & (mean_pixel_zsort[batch_i,:,0] + gausian_boxsize_zsort[batch_i, :, 0] > 0) & (mean_pixel_zsort[batch_i,:,1] - gausian_boxsize_zsort[batch_i, :, 1] < shape_height) & (mean_pixel_zsort[batch_i,:,1] + gausian_boxsize_zsort[batch_i, :, 1] > 0)  
+            gausian_boxsize_wh = gausian_boxsize_zsort[batch_i,:,:][boxsize_mask]
+            mean_pixel_batch = mean_pixel_zsort[batch_i,:,:][boxsize_mask]
+            L_d_batch = L_d_zsort[batch_i,:,:][boxsize_mask]
+            opacity_batch = opacity_zsort[batch_i,:,:][boxsize_mask]
+            variance_inverse_batch = variance_inverse_zsort[batch_i,:,:][boxsize_mask]
+            
+            #endpointおよびstartpointを作成
+            box_startpoint_x = (mean_pixel_batch[:,0] - gausian_boxsize_wh[:,0]).clamp(max=shape_width,min=0)
+            box_startpoint_y = (mean_pixel_batch[:,1] - gausian_boxsize_wh[:,1]).clamp(max=shape_height,min=0)
             box_startpoint = torch.hstack((box_startpoint_x[:,None],box_startpoint_y[:,None]))
-            box_endpoint_x = (mean_pixel_zsort[batch_i,:,:][:,0] + gausian_boxsize_batch[:,0]).clamp(max=shape_width,min=0)
-            box_endpoint_y = (mean_pixel_zsort[batch_i,:,:][:,1] + gausian_boxsize_batch[:,1]).clamp(max=shape_height,min=0)
+            box_endpoint_x = (mean_pixel_batch[:,0] + gausian_boxsize_wh[:,0]).clamp(max=shape_width,min=0)
+            box_endpoint_y = (mean_pixel_batch[:,1] + gausian_boxsize_wh[:,1]).clamp(max=shape_height,min=0)
             box_endpoint = torch.hstack((box_endpoint_x[:,None],box_endpoint_y[:,None]))
+            gausian_boxsize_batch = torch.prod((box_endpoint - box_startpoint + 1), dim=1)
+            print(f"boxsize.shape = {gausian_boxsize_batch.shape}")
+            #バッチ数を1024^3*6 / 80 = 0.075GB以下となるように確定する
+            gausian_batch = torch.cumsum(Utilities.split_by_cumsum_parallel(gausian_boxsize_batch/1024, (1024**3*6/160)/1024),dim=0)
             Utilities.gpu_mem()
             torch.cuda.empty_cache()
             #各ガウシアンの長方形ピクセル座標を2次元配列(N,2)として返す
-            box_startpoint_int = box_startpoint.to(torch.int32)
-            box_endpoint_int = box_endpoint.to(torch.int32)
+            # box_startpoint_int = box_startpoint.to(torch.int32)
+            # box_endpoint_int = box_endpoint.to(torch.int32)
             
             #マスク
             #ガウシアンのvariance_pixelが99.7%タイルが画像に対してある幅以上となるものは全てその幅まで縮小する.
             # 理由：variance_pixelは線形一次近似であって,ガウス中心に対して十分近傍なピクセル値に対してしか有効でないはずだからである.
             # 具体的に画像に対して何パーセントとすべきかは、これ自体をハイパーパラメータとして学習するか公式の実装コードを読み解くしかない.
             
-            boxsize_xy = (box_endpoint_int - box_startpoint_int).clamp(max=ptile_maxwidth)
-            boxsize_mask = (boxsize_xy[:, 0] != 0) | (boxsize_xy[:, 1] != 0) 
-            boxsize = torch.prod((boxsize_xy[boxsize_mask] + 1), dim=1) 
-            print(f"boxsize.shape = {boxsize.shape}")
-            mean_pixel_batch = mean_pixel_zsort[batch_i,:,:][boxsize_mask]
-            L_d_batch = L_d_zsort[batch_i,:,:][boxsize_mask]
-            opacity_batch = opacity_zsort[batch_i,:,:][boxsize_mask]
-            variance_inverse_batch = variance_inverse_zsort[batch_i,:,:][boxsize_mask]
-            #バッチ数を1024^3*6 / 80 = 0.075GB以下となるように確定する
-            gausian_batch = torch.cumsum(Utilities.split_by_cumsum_parallel(boxsize/1024, (1024**3*6/80)/1024),dim=0)
             
             
             for i in range(len(gausian_batch)):
                 # index = start/2
                 start = gausian_batch[i-1].item() if i != 0 else 0
                 end = gausian_batch[i]
-                rects = Utilities.make_rect_points_parallel(box_startpoint_int, box_endpoint_int)
+                rects = Utilities.make_rect_points_parallel(box_startpoint[start:end,:], box_endpoint[start:end,:]).to(torch.float32)
+                torch.cuda.empty_cache()
                 Utilities.gpu_mem()
-                print(f"box_startpoint_int.shape = {box_startpoint_int.shape}")
-                print(f"box_endpoint_int.shape = {box_endpoint_int.shape}")
+                print(f"box_startpoint_int.shape = {box_startpoint[start:end,:].shape}")
+                print(f"box_endpoint_int.shape = {box_endpoint[start:end,:].shape}")
                 #mean_pixel,opacity,L_dをガウシアン長方形ボックスの形に複製&１次元配列化
-                mean_pixel_batch_boxcopy = torch.repeat_interleave(mean_pixel_batch[start:end,:], boxsize, dim=0)
+                mean_pixel_batch_boxcopy = torch.repeat_interleave(mean_pixel_batch[start:end,:].to(torch.float32), gausian_boxsize_batch[start:end], dim=0)
                 # mean_pixel_batch_boxcopy = torch.repeat_interleave(mean_pixel_batch, boxsize, dim=0)
                 print(f"mean_pixel_batch_boxcopy.shape = {mean_pixel_batch_boxcopy.shape}")
                 Utilities.gpu_mem()
                 print(f"L_d_zsortity.shape = {L_d_zsort[batch_i,start:end,:].shape}")
-                L_d_boxcopy = torch.repeat_interleave(L_d_batch[start:end,:], boxsize, dim=0)
+                L_d_boxcopy = torch.repeat_interleave(L_d_batch[start:end,:], gausian_boxsize_batch[start:end], dim=0)
                 Utilities.gpu_mem()
-                opacity_boxcopy = torch.repeat_interleave(opacity_batch[start:end,:], boxsize, dim=0)
+                opacity_boxcopy = torch.repeat_interleave(opacity_batch[start:end,:], gausian_boxsize_batch[start:end], dim=0)
                 Utilities.gpu_mem()
-                variance_inverse_boxcopy = torch.repeat_interleave(variance_inverse_batch[start:end,:], boxsize, dim=0)
+                variance_inverse_boxcopy = torch.repeat_interleave(variance_inverse_batch[start:end,:], gausian_boxsize_batch[start:end], dim=0)
                 Utilities.gpu_mem()
                 Gaus_karnel = torch.exp(-0.5 * (rects - mean_pixel_batch_boxcopy)[:,None,:] @ variance_inverse_boxcopy @ (rects - mean_pixel_batch_boxcopy)[:,:,None])
+                torch.cuda.empty_cache()
                 Utilities.gpu_mem()
                 keys = rects[:,0] * (10000 + 1) + rects[:,1]
                 unti_opacity = 1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1)
@@ -370,7 +380,8 @@ class GS_model_with_param(_GS_model):
             if len(pixel_gausian_batch) > 0:
                 pixel_image_batch.append(pixel_gausian_batch[-1])
                 pixel_gausian_batch[-1] = 0
-
+        
+        return torch.stack(pixel_image_batch, dim=0).reshape(-1,3,shape_height,shape_width)
                 
         
         #ピクセル行列の計算のパイプライン
@@ -484,8 +495,6 @@ class GS_model_with_param(_GS_model):
         # Utilities.gpu_mem()
         # pixel_clipping = torch.clamp(pixel, min=0.0, max=1.0) 
         # #戻り値を返す.
-        return 
-
     
     def culling_param(self):
         

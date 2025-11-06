@@ -382,7 +382,8 @@ class Utilities():
 
         # 各行ベクトルを整数キーに変換 Gはint32以上の整数値でなければならない
         if(G_unique) :
-            keys = G[:,0] * (10000 + 1) + G[:,1]  # 例: tensor([1000100,  11000]) 最大で10000までしか対応できない
+            keys = G[:,0] * (10000 + 1) + G[:,1]
+            # 例: tensor([1000100,  11000]) 最大で10000までしか対応できない
         else: 
             keys = G
 
@@ -556,3 +557,5 @@ class Utilities():
             pixel_image_batch.append(pixel_img)
 
         return torch.stack(pixel_image_batch, dim=0)
+
+   

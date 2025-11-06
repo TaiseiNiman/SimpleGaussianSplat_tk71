@@ -10,7 +10,10 @@ print("Site-packages path:", sys.path)
 # print(torch.__version__)
 # print(torch.version.cuda)
 # print(torch.backends.cudnn.version())
-# print(torch.cuda.is_available())   
+# print(torch.cuda.is_available())  
+
+print(torch.cuda.get_device_properties(0))
+ 
 
 def grouped_cartesian_product_efficient(x: torch.Tensor, y: torch.Tensor, group: torch.Tensor):
     """
@@ -78,10 +81,3 @@ def make_rect_points_parallel(start: torch.Tensor, end: torch.Tensor):
 
     return torch.stack((x_coords, y_coords), dim=1)
 
-start = torch.tensor([[0, 0],
-                      [5, 10]], dtype=torch.int32)
-end   = torch.tensor([[2, 1],
-                      [6, 12]], dtype=torch.int32)
-
-coords = make_rect_points_parallel(start, end)
-print(coords)

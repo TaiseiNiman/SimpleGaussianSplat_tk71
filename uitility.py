@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader, Dataset
 import kornia.metrics as metrics
 import math
 import gc
-
+import torch_scatter
 
 class Utilities():
     #gpuメモリ監視
@@ -367,53 +367,66 @@ class Utilities():
         return torch.stack((x_coords, y_coords), dim=1)
     
     #グループ化された累積積を計算する
-    def grouped_cumprod(A,G, G_unique = False):#G_uniqueはkeys = G[:,0] * (MAX_VAL + 1) + G[:,1]で変換
-        # 例
-        # A = torch.tensor([1, 2, 3, 4, 5, 6, 7], dtype=torch.float32, device="cuda")
-        # G = torch.tensor([[1,1],
-        #                 [1,2],
-        #                 [1,1],
-        #                 [1,2],
-        #                 [1,3],
-        #                 [1,1],
-        #                 [1,3]])
-        #結果
-        #   tensor([ 1.0000,  2.0000,  3.0000,  8.0000,  5.0000, 18.0000, 35.0000])
+    def grouped_comprod(A, G):
+        
+        inv = torch.unique(G, return_inverse=True)[1]
+        sorted_inv,index = torch.sort(inv)
+        A_sorted = A[index]
+        A_sorted_cumprod = torch.cumprod(A_sorted,dim=0)
+        A_sorted_grouped_prod = torch_scatter.scatter_mul(A_sorted ,sorted_inv,dim=0)
+        cumprod_max = torch_scatter.scatter_min(A_sorted_cumprod,sorted_inv,dim=0) / A_sorted_grouped_prod
+        count = torch_scatter.scatter_add(torch.ones_like(sorted_inv,device="cuda",dtype=torch.float32), sorted_inv)
+        cumprod_max_interleave = torch.repeat_interleave(cumprod_max, count, dim=0)
+        return (A_sorted_cumprod / cumprod_max_interleave)[torch.argsort(index)]
+        
+    
+    # def grouped_cumprod(A,G, G_unique = False):#G_uniqueはkeys = G[:,0] * (MAX_VAL + 1) + G[:,1]で変換
+    #     # 例
+    #     # A = torch.tensor([1, 2, 3, 4, 5, 6, 7], dtype=torch.float32, device="cuda")
+    #     # G = torch.tensor([[1,1],
+    #     #                 [1,2],
+    #     #                 [1,1],
+    #     #                 [1,2],
+    #     #                 [1,3],
+    #     #                 [1,1],
+    #     #                 [1,3]])
+    #     #結果
+    #     #   tensor([ 1.0000,  2.0000,  3.0000,  8.0000,  5.0000, 18.0000, 35.0000])
 
-        # 各行ベクトルを整数キーに変換 Gはint32以上の整数値でなければならない
-        if(G_unique) :
-            keys = G[:,0] * (10000 + 1) + G[:,1]
-            # 例: tensor([1000100,  11000]) 最大で10000までしか対応できない
-        else: 
-            keys = G
+    #     # 各行ベクトルを整数キーに変換 Gはint32以上の整数値でなければならない
+    #     if(G_unique) :
+    #         keys = G[:,0] * (10000 + 1) + G[:,1]
+    #         # 例: tensor([1000100,  11000]) 最大で10000までしか対応できない
+    #     else: 
+    #         keys = G
 
-        # key順にソート
-        sorted_keys, sort_idx = torch.sort(keys)
-        A_sorted = A[sort_idx]
+    #     # key順にソート
+    #     sorted_keys, sort_idx = torch.sort(keys)
+    #     A_sorted = A[sort_idx]
 
-        # keyの変化を検出して「グループ開始点」を求める
-        key_change = torch.cat([torch.tensor([True], device=A.device),
-                                sorted_keys[1:] != sorted_keys[:-1]])
+    #     # keyの変化を検出して「グループ開始点」を求める
+    #     key_change = torch.cat([torch.tensor([True], device=A.device),
+    #                             sorted_keys[1:] != sorted_keys[:-1]])
 
-        # グループごとの「セグメントID」を生成
-        group_id = key_change.cumsum(dim=0) - 1  # 0始まり
+    #     # グループごとの「セグメントID」を生成
+    #     group_id = key_change.cumsum(dim=0) - 1  # 0始まり
 
-        # グループごとの累積積をベクトル化で取る
-        #    (同じgroup_idの中で累積積が進む)
-        #    まず、group_idの境界で累積積をリセットするためにトリックを使う
-        cum_A = torch.cumprod(A_sorted, dim=0)
-        # しかし group_id ごとにリセットしたい → 差分を使う
+    #     # グループごとの累積積をベクトル化で取る
+    #     #    (同じgroup_idの中で累積積が進む)
+    #     #    まず、group_idの境界で累積積をリセットするためにトリックを使う
+    #     cum_A = torch.cumprod(A_sorted, dim=0)
+    #     # しかし group_id ごとにリセットしたい → 差分を使う
 
-        # (1) 同じgroup_idの前要素を1で埋めるマスク
-        reset_mask = torch.cat([torch.tensor([0], device=A.device), (group_id[1:] != group_id[:-1]).int()])
-        # (2) リセット位置を使って補正
-        logA = torch.log(A_sorted + 1e-12)
-        cumlog = torch.cumsum(logA * (1 - reset_mask.cumsum(0).diff(prepend=torch.tensor([0], device=A.device))), dim=0)
-        cumprod_grouped = torch.exp(cumlog)
+    #     # (1) 同じgroup_idの前要素を1で埋めるマスク
+    #     reset_mask = torch.cat([torch.tensor([0], device=A.device), (group_id[1:] != group_id[:-1]).int()])
+    #     # (2) リセット位置を使って補正
+    #     logA = torch.log(A_sorted + 1e-12)
+    #     cumlog = torch.cumsum(logA * (1 - reset_mask.cumsum(0).diff(prepend=torch.tensor([0], device=A.device))), dim=0)
+    #     cumprod_grouped = torch.exp(cumlog)
 
-        # 元の順序に戻す
-        unsort_idx = torch.argsort(sort_idx)
-        return cumprod_grouped[unsort_idx] # 例 tensor([ 1.0000,  2.0000,  3.0000,  8.0000,  5.0000, 18.0000, 35.0000])
+    #     # 元の順序に戻す
+    #     unsort_idx = torch.argsort(sort_idx)
+    #     return cumprod_grouped[unsort_idx] # 例 tensor([ 1.0000,  2.0000,  3.0000,  8.0000,  5.0000, 18.0000, 35.0000])
     
     #2×2専用の行列の逆行列を閉形式でも計算
     def invert_2x2_batch(A: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:

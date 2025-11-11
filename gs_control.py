@@ -13,6 +13,7 @@ from uitility import Utilities
 from gs_model import GS_dataset, GS_model_with_param
 from gs_load_colmap import Load_colmap_data_from_binaries, Image_to_transform
 from gs_visualizer import Visualizer
+from cuda_kernel import cuda_kernel
 
 
 #コントロールクラス
@@ -84,6 +85,7 @@ class Control():
             self.camera_extent = self.GS_dataset.get_camera_extent()
             #レンダリング画像出力用のウィンドウ作成
             self.vis = Visualizer()
+            
             #イテレーション開始
             learning_numbers_per_epoch = self.learning_numbers / len(image_samples) #１エポックあたりの学習回数
             

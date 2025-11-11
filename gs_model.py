@@ -11,6 +11,7 @@ import math
 import gc
 from uitility import Utilities
 import torch_scatter
+from cuda_kernel import cuda_kernel
 
 
 #3dgsデータセットの定義
@@ -110,6 +111,7 @@ class GS_model_with_param(_GS_model):
         super().__init__(self)
         self.ultra = _GS_model_with_ultra_param(grad_delta_upper_limit,grad_threshold,percent_dense,variance_pixel_tile_max_width, caller=self)
         self.super = _GS_model_with_super_param(lr,lr,prunning_min_opacity,caller=self)
+        self.cuda_kernel = cuda_kernel()
         self.mean = torch.nn.Parameter(mean)
         self.variance_q = torch.nn.Parameter(variance_q)
         self.variance_scale = torch.nn.Parameter(variance_scale)
@@ -365,6 +367,7 @@ class GS_model_with_param(_GS_model):
                 torch.cuda.empty_cache()
                 Utilities.gpu_mem()
                 keys = (rects[:,0] * (10000 + 1) + rects[:,1]).to(torch.long)
+                # self.cuda_kernel.cuda_kernel.grouped_cumprod()
                 if(len(pixel_keys_max) > 0):
                     #
                     unti_opacity = torch.cat((anti_opacity_max[-1],(1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1))),dim=0).clamp(min=1e-8)

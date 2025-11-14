@@ -15,6 +15,7 @@ print("Site-packages path:", sys.path)
 print(torch.cuda.get_device_properties(0))
  
 
+
 def grouped_cartesian_product_efficient(x: torch.Tensor, y: torch.Tensor, group: torch.Tensor):
     """
     グループごとのデカルト積 (完全ベクトル化, O(Σ M_i²) メモリ)

@@ -1,0 +1,10 @@
+LICENSE
+README.md
+setup.py
+cuda_kernel/cuda_kernel.cpp
+cuda_kernel/grouped_cumprod_backward.cu
+cuda_kernel/grouped_cumprod_forward.cu
+grouped_cumprod.egg-info/PKG-INFO
+grouped_cumprod.egg-info/SOURCES.txt
+grouped_cumprod.egg-info/dependency_links.txt
+grouped_cumprod.egg-info/top_level.txt

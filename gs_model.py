@@ -1,17 +1,11 @@
-import pycolmap
 import torch
 import numpy as np
-import os
 from PIL import Image
-import torchvision
-import scipy
-from torch.utils.data import DataLoader, Dataset
+import torch.utils.data
 import kornia.metrics as metrics
-import math
 import gc
 from uitility import Utilities
-import torch_scatter
-from cuda_kernel import cuda_kernel
+import grouped_cumprod
 
 
 #3dgsデータセットの定義
@@ -111,7 +105,6 @@ class GS_model_with_param(_GS_model):
         super().__init__(self)
         self.ultra = _GS_model_with_ultra_param(grad_delta_upper_limit,grad_threshold,percent_dense,variance_pixel_tile_max_width, caller=self)
         self.super = _GS_model_with_super_param(lr,lr,prunning_min_opacity,caller=self)
-        self.cuda_kernel = cuda_kernel()
         self.mean = torch.nn.Parameter(mean)
         self.variance_q = torch.nn.Parameter(variance_q)
         self.variance_scale = torch.nn.Parameter(variance_scale)
@@ -289,7 +282,7 @@ class GS_model_with_param(_GS_model):
         variance_inverse_zsort = variance_inverse[image_index,z_index,:]
         L_d_zsort = L_d[image_index,z_index,:]
         ptile_maxwidth = torch.sqrt(shape_wh)*torch.sigmoid(self.ultra.variance_pixel_tile_max_width)
-        gausian_boxsize_zsort = gausian_boxsize[image_index,z_index,:].clamp(max=ptile_maxwidth/2).to(torch.int32)
+        gausian_boxsize_zsort = gausian_boxsize[image_index,z_index,:].clamp(max=ptile_maxwidth*10).to(torch.int32)
         print(f"opacity.shape = {opacity_zsort.shape}")
         print(f"mean_pixel_zsort.shape = {mean_pixel_zsort.shape}")
         print(f"variance_inverse_zsort.shape = {variance_inverse_zsort.shape}")
@@ -328,7 +321,7 @@ class GS_model_with_param(_GS_model):
             gausian_boxsize_batch = torch.prod((box_endpoint - box_startpoint + 1), dim=1)
             print(f"boxsize.shape = {gausian_boxsize_batch.shape}")
             #バッチ数を1024^3*6 / 80 = 0.075GB以下となるように確定する
-            gausian_batch = torch.cumsum(Utilities.split_by_cumsum_parallel(gausian_boxsize_batch/1024, (1024**3*6/160)/1024),dim=0)
+            gausian_batch = torch.cumsum(Utilities.split_by_cumsum_parallel(gausian_boxsize_batch/1024, (1024**3*6/640)/1024),dim=0)
             Utilities.gpu_mem()
             torch.cuda.empty_cache()
             #各ガウシアンの長方形ピクセル座標を2次元配列(N,2)として返す
@@ -346,45 +339,57 @@ class GS_model_with_param(_GS_model):
                 # index = start/2
                 start = gausian_batch[i-1].item() if i != 0 else 0
                 end = gausian_batch[i]
-                rects = Utilities.make_rect_points_parallel(box_startpoint[start:end,:], box_endpoint[start:end,:]).to(torch.float32)
+                rects = Utilities.make_rect_points_parallel(box_startpoint[start:end,:], box_endpoint[start:end,:]).to(torch.int32)
                 torch.cuda.empty_cache()
                 Utilities.gpu_mem()
                 print(f"box_startpoint_int.shape = {box_startpoint[start:end,:].shape}")
                 print(f"box_endpoint_int.shape = {box_endpoint[start:end,:].shape}")
-                #mean_pixel,opacity,L_dをガウシアン長方形ボックスの形に複製&１次元配列化
-                mean_pixel_batch_boxcopy = torch.repeat_interleave(mean_pixel_batch[start:end,:].to(torch.float32), gausian_boxsize_batch[start:end], dim=0)
-                # mean_pixel_batch_boxcopy = torch.repeat_interleave(mean_pixel_batch, boxsize, dim=0)
-                print(f"mean_pixel_batch_boxcopy.shape = {mean_pixel_batch_boxcopy.shape}")
-                Utilities.gpu_mem()
-                print(f"L_d_zsortity.shape = {L_d_zsort[batch_i,start:end,:].shape}")
-                L_d_boxcopy = torch.repeat_interleave(L_d_batch[start:end,:], gausian_boxsize_batch[start:end], dim=0)
-                Utilities.gpu_mem()
-                opacity_boxcopy = torch.repeat_interleave(opacity_batch[start:end,:], gausian_boxsize_batch[start:end], dim=0)
-                Utilities.gpu_mem()
-                variance_inverse_boxcopy = torch.repeat_interleave(variance_inverse_batch[start:end,:], gausian_boxsize_batch[start:end], dim=0)
-                Utilities.gpu_mem()
-                Gaus_karnel = torch.exp(-0.5 * (rects - mean_pixel_batch_boxcopy)[:,None,:] @ variance_inverse_boxcopy @ (rects - mean_pixel_batch_boxcopy)[:,:,None])
+                #ボックスコピー
+                mean_pixel_batch_boxcopy,L_d_boxcopy,opacity_boxcopy,variance_inverse_boxcopy = self.boxcopy(gausian_boxsize_batch[start:end],mean_pixel_batch[start:end,:].to(torch.float32),L_d_batch[start:end,:],opacity_batch[start:end,:],variance_inverse_batch[start:end,:])
+                Gaus_karnel = torch.exp(-0.5 * (rects.to(torch.float32) - mean_pixel_batch_boxcopy)[:,None,:] @ variance_inverse_boxcopy @ (rects.to(torch.float32) - mean_pixel_batch_boxcopy)[:,:,None])
                 torch.cuda.empty_cache()
                 Utilities.gpu_mem()
-                keys = (rects[:,0] * (10000 + 1) + rects[:,1]).to(torch.long)
                 # self.cuda_kernel.cuda_kernel.grouped_cumprod()
                 if(len(pixel_keys_max) > 0):
                     #
-                    unti_opacity = torch.cat((anti_opacity_max[-1],(1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1))),dim=0).clamp(min=1e-8)
-                    T_0 = (Utilities.grouped_cumprod(unti_opacity,torch.cat((pixel_keys_max[-1],keys),dim=0)) / unti_opacity)[len(pixel_keys_max[-1]):]
+                    
                     #
-                    unique_keys, inv = torch.unique(keys, return_inverse=True)
-                    anti_opacity_max.append(torch_scatter.scatter_max((T_0 * unti_opacity[len(pixel_keys_max[-1]):]), inv, dim=0)[0])
+                    unique_keys, inv = torch.unique(torch.cat((pixel_keys_max[-1],rects),dim=0),dim=0, return_inverse=True)
+                    #ソート
+                    pixel_index_tensor,pixel_index = torch.sort(inv)
+                    #
+                    unti_opacity = torch.cat((anti_opacity_max[-1],(1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1))),dim=0).clamp(min=1e-8)[pixel_index]
+                    T_0_r_nosorted = custom_autograd_grouped_cumprod.apply(unti_opacity,pixel_index_tensor,box_startpoint[start:end,:],box_endpoint[start:end,:],gausian_boxsize_batch[start:end],mean_pixel_batch[start:end,:].to(torch.float32),opacity_batch[start:end,:],variance_inverse_batch[start:end,:],pixel_keys_max[-1],anti_opacity_max[-1])
+                    argsorted_index = torch.argsort(pixel_index)
+                    T_0_r = T_0_r_nosorted[argsorted_index] 
+                    T_0_r_nosorted = None
+                    anti_opacity_max.append(torch.zeros_like(unique_keys[:,0],device="cuda",dtype=torch.float32).scatter_reduce(0, inv, T_0_r, reduce="amin", include_self=False))
                     pixel_keys_max.append(unique_keys)
                     anti_opacity_max[-2] = 0
                     pixel_keys_max[-2] = 0
+                    T_0 = (T_0_r / unti_opacity[argsorted_index])[len(pixel_keys_max[-1]):]
+                    T_0_r = None
+                    gc.collect()
+                    torch.cuda.empty_cache()
                     
                 else:
-                    unti_opacity = (1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1)).clamp(min=1e-8)
-                    T_0 = Utilities.grouped_cumprod(unti_opacity,keys) / unti_opacity
-                    unique_keys, inv = torch.unique(keys, return_inverse=True)
-                    anti_opacity_max.append(torch_scatter.scatter_max((T_0 * unti_opacity), inv, dim=0)[0])
+                    
+                    unique_keys, inv = torch.unique(rects,dim=0, return_inverse=True)
+                    #ソート
+                    pixel_index_tensor,pixel_index = torch.sort(inv)
+                    unti_opacity = (1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1)).clamp(min=1e-8)[pixel_index]
+                    T_0_r_nosorted = custom_autograd_grouped_cumprod.apply(unti_opacity,pixel_index_tensor,box_startpoint[start:end,:],box_endpoint[start:end,:],gausian_boxsize_batch[start:end],mean_pixel_batch[start:end,:].to(torch.float32),opacity_batch[start:end,:],variance_inverse_batch[start:end,:])
+                    # loss = torch.sum((T_0_r_nosorted**2 / 2),dim=0)
+                    # self.backward(loss)
+                    argsorted_index = torch.argsort(pixel_index)
+                    T_0_r = T_0_r_nosorted[argsorted_index] 
+                    T_0_r_nosorted = None
+                    anti_opacity_max.append(torch.zeros_like(unique_keys[:,0],device="cuda",dtype=torch.float32).scatter_reduce(0, inv, T_0_r, reduce="amin", include_self=False))
                     pixel_keys_max.append(unique_keys)
+                    T_0 = T_0_r / unti_opacity[argsorted_index]
+                    T_0_r = None
+                    gc.collect()
+                    torch.cuda.empty_cache()
                 
                 
   
@@ -424,126 +429,76 @@ class GS_model_with_param(_GS_model):
         
         a = 0
         return torch.stack(pixel_image_batch, dim=0)[:,1:,1:,:].reshape(-1,3,shape_height,shape_width)
-                
-        
-        #ピクセル行列の計算のパイプライン
-        #ピクセルマスクの作成
-        #x_pixel,y_pixel
-        # x_pixel = torch.arange(wh[0,0],device="cuda",dtype=torch.float32)
-        # y_pixel = torch.arange(wh[0,1],device="cuda",dtype=torch.float32)
-        # #ピクセル格子点の座標行列を取得（デカルト積を用いる）
-        # Utilities.gpu_mem()
-        # # pixel_uv = torch.column_stack([x_pixel[None,:].repeat(len(y_pixel), 1), torch.tile(y_pixel, len(x_pixel))])
-        # n, m = int(wh[0,1].item()), int(wh[0,0].item())
-        # i = torch.arange(n,device="cuda",dtype=torch.float32).unsqueeze(1).expand(n, m)  # shape (n, m)
-        # j = torch.arange(m,device="cuda",dtype=torch.float32).unsqueeze(0).expand(n, m)  # shape (n, m)
-        # pixel_uv = torch.stack((i, j), dim=2)[..., [1,0]] #要素は(x,y)の順であることに注意
-        # pixel_uv_brod = pixel_uv[None,None,:,:,:]
-        # #broadcast
-        # Utilities.gpu_mem()
-        # x_pixel_broadcast = x_pixel[None,None,:]
-        # y_pixel_broadcast = y_pixel[None,None,:]
-        # Utilities.gpu_mem()
-        # p_x = mean_pixel[:,:,0][:,:,None]
-        # Utilities.gpu_mem()
-        # gb_x = gausian_boxsize[:,:,0][:,:,None]
-        # p_y = mean_pixel[:,:,1][:,:,None]
-        # gb_y = gausian_boxsize[:,:,1][:,:,None]
-        # Utilities.gpu_mem()
-        # #ガウシアン99.7%ボックスのマスク
-        # gausian_box_mask_x = (p_x - gb_x <= x_pixel_broadcast) and (x_pixel_broadcast <= p_x + gb_x)
-        # gausian_box_mask_y = (p_y - gb_y <= y_pixel_broadcast) and (y_pixel_broadcast <= p_y + gb_y)
-        # #z深度=0を除外するマスク(幾何学的には画像面の無限遠点に相当する)
-        # Utilities.gpu_mem()
-        # # z_zero_mask = (mean_pixel_homo[:,:,2] != 0)
-        # #固有値のいずれかが0となる場合を除外するマスク(正則にならないので逆行列を計算できない)
-        # #マスクの計算
-        # Utilities.gpu_mem()
-        # msk = gausian_box_mask_x[:,:,None,:] & gausian_box_mask_y[:,:,:,None]
-        
-        # #ガウスカーネルの計算
-        # mean_k = (pixel_uv_brod - mean_pixel[:,:,None,None,:]) #[:,:,:,None,:]
-        # Utilities.gpu_mem()
-        # variance_inverse_k = torch.linalg.inv(variance_pixel)[:,:,None,None,:,:]
-        # Utilities.gpu_mem()
-        # Gaus_karnel = torch.exp(-0.5 * mean_k[:,:,:,:,None,:] @ variance_inverse_k @ mean_k[:,:,:,:,:,None])
-        # #深度zでパラメータを昇順にソート
-        # #深度インデックスの計算
-        # Utilities.gpu_mem()
-        # z_index = torch.argsort(mean_camera[:,:,2],dim=1)
-        # #逆深度インデックスの計算
-        # Utilities.gpu_mem()
-        # z_index_reverse = torch.argsort(z_index,dim=1)
-        # #batchのためのブロードキャスト配列の作成
-        # Utilities.gpu_mem()
-        # batch_index = torch.arange(shape_image)[:,None]
-        # #不透明度パラメータをzソート
-        # Utilities.gpu_mem()
-        # opacity_batch_zsort = torch.sigmoid_(self.opacity)[None,:,:][torch.zeros(shape_image),:,:][batch_index,z_index,:]
-        # #透過率T_oの計算
-        # #透明度(1-不透明度)の相乗を計算するためにopacity_batchをブロードキャストする.
-        # Utilities.gpu_mem()
-        # opacity_batch_broadcast = opacity_batch_zsort[:,None,:,:] + torch.zeros(shape_image,shape_wh,shape_gausian,shape_gausian)
-        # #ガウスカーネルで重みづけ
-        # #ガウスカーネルをブロードキャスト 
-        # # !maskするときは,まずブロードキャストしてshapeを同じにするべきです.
-        # # !なぜなら,ブロードキャストとmaskを併用するとブロードキャストされる前にmaskされてしまう.
-        # # !また,A[mask] = (B[mask] + C[mask]) @ D[mask]...という形に計算される前にマスクをかけないと,
-        # # !maskを満足しない要素に対しても計算が行われる.maskの使用で生じる非連続なメモリ計算によるオーバーヘッドを考慮して,
-        # # 極端に疎なテンソルに対してはmaskをかける,そうでなければ可算や乗算のような単純な計算では全要素で計算するという方法を用いるべきです.
-        # # とりあえず全てmaskかけて計算した.テンソルとマスクの要素数を比較して割合を求めて,条件分岐する式を書き加えればよいだけ.
-        # Utilities.gpu_mem()
-        # Gaus_kernel_broadcast_to_opacity = torch.broadcast_to(Gaus_karnel.reshape(shape_image,shape_wh,shape_gausian)[:,:,None,:],opacity_batch_broadcast.shape)
-        # Utilities.gpu_mem()
-        # msk_broadcast_to_opacity = torch.broadcast_to(msk.reshape(shape_image,shape_wh,shape_gausian)[:,:,None,:],opacity_batch_broadcast.shape)
-        # Utilities.gpu_mem()
-        # opacity_kernel = torch.zeros(shape_image,shape_wh,shape_gausian,shape_gausian)
-        # # ガウスカーネルをzソート←忘れてた.
-        # # ４階のテンソルに対して第3軸(つまり最後の軸)に対してz_indexで指定された順序でソートを行う
-        # # 非常に煩雑な計算で,これは修正する必要があると思う
-        # z_index_broadcast = torch.broadcast_to(z_index[:,None,None,:],opacity_batch_broadcast)[:,:,0,:]
-        # Utilities.gpu_mem()
-        # z_index_broadcast_reverse = torch.argsort(z_index_broadcast,axis=3)
-        # z_index_broadcast_0 = torch.broadcast_to(torch.arange(shape_image)[:,None,None], z_index_broadcast)
-        # Utilities.gpu_mem()
-        # z_index_broadcast_1 = torch.broadcast_to(torch.arange(shape_wh)[None,:,None], z_index_broadcast)
-        # Gaus_kernel_broadcast_to_opacity_zsort = Gaus_kernel_broadcast_to_opacity[z_index_broadcast_0,z_index_broadcast_1,:,z_index_broadcast]
-        # Utilities.gpu_mem()
-
-        # opacity_kernel[msk_broadcast_to_opacity] = torch.tril(opacity_batch_broadcast,k=-1)[msk_broadcast_to_opacity] * Gaus_kernel_broadcast_to_opacity_zsort[msk_broadcast_to_opacity]
-        # #透過率T_oを計算しそれを逆zソートして元の順番に戻す.
-        # # T_o -> (画像数,ガウス数,1)
-        # Utilities.gpu_mem()
-        # T_o = torch.broadcast_to(torch.prod(1 - opacity_kernel,axis=3)[:,:,None,:],opacity_batch_broadcast)[z_index_broadcast_0,z_index_broadcast_1,:,z_index_broadcast_reverse]
-        # #ピクセル輝度pixelを計算
-        # #maskを適用するためにブロードキャスト
-        # #maskをA[mask]=B[mask]+C[mask]という形で計算すれば、maskで除外された要素は計算されないので、要素計算が重い場合に高速に計算できる。
-        # #たとえコードが長くなっても最適化のためにやるべきです。
-        # Utilities.gpu_mem()
-        # opacity_batch_broadcast_r = opacity_batch_broadcast[:,:,0,:][:,:,:,None] + torch.zeros(shape_image,shape_wh,shape_gausian,3)
-        # L_d_broadcast_r = torch.broadcast_to(L_d[:,None,:,:],opacity_batch_broadcast_r)
-        # Utilities.gpu_mem()
-        # Gaus_kernel_broadcast_to_opacity_r = torch.broadcast_to(Gaus_kernel_broadcast_to_opacity[:,:,0,:][:,:,:,None],opacity_batch_broadcast_r)
-        # T_o_r = torch.broadcast_to(T_o[:,:,0,:][:,:,:,None],opacity_batch_broadcast_r)
-        # Utilities.gpu_mem()
-        # msk_r = torch.broadcast_to(msk_broadcast_to_opacity[:,:,0,:][:,:,:,None],opacity_batch_broadcast_r)
-        # pixel_r = torch.zeros(opacity_batch_broadcast_r.shape)
-        # Utilities.gpu_mem()
-        # pixel_r[msk_r] = opacity_batch_broadcast_r[msk_r] * L_d_broadcast_r[msk_r] * Gaus_kernel_broadcast_to_opacity_r[msk_r] * T_o_r[msk_r]
-        # #ピクセル行列pixelの計算 pixel -> (画像数,ガウス数,チャンネル数(RGB=3),height,width)
-        # Utilities.gpu_mem()
-        # pixel = torch.sum(pixel_r,axis=2).reshape(shape_image,3,wh[0,1],wh[0,0])
-        # #クリッピングする
-        # Utilities.gpu_mem()
-        # pixel_clipping = torch.clamp(pixel, min=0.0, max=1.0) 
-        # #戻り値を返す.
     
-    def culling_param(self):
+    def boxcopy(self,boxsize,*tensors):
+        output = []
+        for tensor in tensors:
+            output.append(torch.repeat_interleave(tensor, boxsize, dim=0))
+        return output
+    
+    def create_T_0(self,unti_opacity,keys):
+        #
+        unique_keys, inv = torch.unique(keys, return_inverse=True)
+        #ソート
+        pixel_index_tensor,pixel_index = torch.sort(inv)
+        return (self.cuda_kernel.grouped_cumprod(unti_opacity[pixel_index],pixel_index_tensor)[torch.argsort(pixel_index)] / unti_opacity)
+
+
+class custom_autograd_grouped_cumprod(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, unti_opacity_sorted, pixel_index, box_startpoint,box_endpoint,boxsize,mean,opacity,variance_inverse,pixel_max=None,anti_opacity_max=None):
+        #結果配列
+        output = torch.zeros_like(unti_opacity_sorted)
+        #cudaカーネルでグループごとの累積積を計算し,output配列に代入
+        grouped_cumprod.grouped_cumprod_forward(unti_opacity_sorted,pixel_index.to(torch.int32),output)
+        #
+        ctx.save_for_backward(box_startpoint,box_endpoint,boxsize,mean,opacity,variance_inverse,pixel_max,anti_opacity_max)
+        return output
+    @staticmethod
+    def backward(ctx,grad):
+        startpoint,endpoint,boxsize,mean,opacity,variance_inverse,pixel_max,anti_opacity_max = ctx.saved_tensors
+        rects = Utilities.make_rect_points_parallel(startpoint, endpoint).to(torch.int32)
+        #ボックスコピー
+        mean_pixel_batch_boxcopy,opacity_boxcopy,variance_inverse_boxcopy = boxcopy(boxsize,mean.to(torch.float32),opacity,variance_inverse)
+        Gaus_karnel = torch.exp(-0.5 * (rects.to(torch.float32) - mean_pixel_batch_boxcopy)[:,None,:] @ variance_inverse_boxcopy @ (rects.to(torch.float32) - mean_pixel_batch_boxcopy)[:,:,None])
+        torch.cuda.empty_cache()
+        Utilities.gpu_mem()
+        if(pixel_max):
+            #
+            unti_opacity = torch.cat((anti_opacity_max,(1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1))),dim=0)
+            #
+            unique_keys, inv = torch.unique(torch.cat((pixel_max,rects),dim=0), dim=0, return_inverse=True)
+            #ソート
+            pixel_index_tensor,pixel_index = torch.sort(inv)
+            pixel_index_tensor_len = torch.zeros_like(unique_keys[:,0],device="cuda",dtype=torch.int32).scatter_reduce(0, pixel_index_tensor, torch.ones_like(pixel_index_tensor,device="cuda",dtype=torch.int32), reduce="sum", include_self=False).cumsum(dim=0).to(torch.int32)
+            T_0_r = torch.zeros_like(unti_opacity)
+            grouped_cumprod.grouped_cumprod_forward(unti_opacity[pixel_index],pixel_index_tensor.to(torch.int32),T_0_r)
+            gradin = torch.zeros_like(unti_opacity)
+            grouped_cumprod.grouped_cumprod_backward(unti_opacity[pixel_index],T_0_r,grad,pixel_index_tensor.to(torch.int32),gradin,pixel_index_tensor_len)
+            T_0_r = None
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+        else:
+            #
+            unti_opacity = (1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1))
+            #
+            unique_keys, inv = torch.unique(rects, dim=0, return_inverse=True)
+            #ソート
+            pixel_index_tensor,pixel_index = torch.sort(inv)
+            pixel_index_tensor_len = torch.zeros_like(unique_keys[:,0],device="cuda",dtype=torch.int32).scatter_reduce(0, pixel_index_tensor, torch.ones_like(pixel_index_tensor,device="cuda",dtype=torch.int32), reduce="sum", include_self=False).cumsum(dim=0).to(torch.int32)
+            T_0_r = torch.zeros_like(unti_opacity)
+            grouped_cumprod.grouped_cumprod_forward(unti_opacity[pixel_index],pixel_index_tensor.to(torch.int32),T_0_r)
+            gradin = torch.zeros_like(unti_opacity)
+            grouped_cumprod.grouped_cumprod_backward(unti_opacity[pixel_index],T_0_r,grad,pixel_index_tensor.to(torch.int32),gradin,pixel_index_tensor_len)
+            T_0_r = None
+            gc.collect()
+            torch.cuda.empty_cache()
         
-        return self
-    def cloning_param(self):
+        return gradin,None,None,None,None,None,None,None,None,None
 
-        return self
-    def splitting_param(self):
-
-        return self
+def boxcopy(boxsize,*tensors):
+        output = []
+        for tensor in tensors:
+            output.append(torch.repeat_interleave(tensor, boxsize, dim=0))
+        return output

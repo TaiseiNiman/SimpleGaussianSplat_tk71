@@ -13,7 +13,6 @@ from uitility import Utilities
 from gs_model import GS_dataset, GS_model_with_param
 from gs_load_colmap import Load_colmap_data_from_binaries, Image_to_transform
 from gs_visualizer import Visualizer
-from cuda_kernel import cuda_kernel
 
 
 #コントロールクラス
@@ -33,11 +32,11 @@ class Control():
             self.dense_percent = 0.1
             self.prunning_opacity_min = 0.01
             self.reset_opacity_min = 0.01
-            self.densify_from_iter = 1
-            self.densification_interval = 1000
+            self.densify_from_iter = 100
+            self.densification_interval = 100
             self.opacity_reset_interval_per_densification = 0
             self.variance_pixel_tile_max_width = 0.04
-            self.learning_rate = 0.1
+            self.learning_rate = 0.2
    
     #modeを変更する
     def changing_mode(self,mode) : # mode = True -> 簡易モード
@@ -115,6 +114,7 @@ class Control():
                     loss_d_ssim =  1 - metrics.ssim(model_images, images_tensor_gpu, max_val=1.0, window_size=11).mean()
                     loss_1 = torch.nn.functional.l1_loss(model_images, images_tensor_gpu, reduction='mean')
                     loss = (1-self.loss_lamda) * loss_1 + self.loss_lamda * loss_d_ssim
+                    print(f"loss:{loss}")
                     #自動微分による勾配計算
                     self.GS_model_param.backward(loss)
                     #ガウス分布の位置の勾配値の積算回数の更新

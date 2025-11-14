@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader, Dataset
 import kornia.metrics as metrics
 import math
 import gc
-import torch_scatter
 
 class Utilities():
     #gpuメモリ監視
@@ -367,17 +366,17 @@ class Utilities():
         return torch.stack((x_coords, y_coords), dim=1)
     
     #グループ化された累積積を計算する
-    def grouped_comprod(A, G):
+    # def grouped_comprod(A, G):
         
-        inv = torch.unique(G, return_inverse=True)[1]
-        sorted_inv,index = torch.sort(inv)
-        A_sorted = A[index]
-        A_sorted_cumprod = torch.cumprod(A_sorted,dim=0)
-        A_sorted_grouped_prod = torch_scatter.scatter_mul(A_sorted ,sorted_inv,dim=0)
-        cumprod_max = torch_scatter.scatter_min(A_sorted_cumprod,sorted_inv,dim=0) / A_sorted_grouped_prod
-        count = torch_scatter.scatter_add(torch.ones_like(sorted_inv,device="cuda",dtype=torch.float32), sorted_inv)
-        cumprod_max_interleave = torch.repeat_interleave(cumprod_max, count, dim=0)
-        return (A_sorted_cumprod / cumprod_max_interleave)[torch.argsort(index)]
+    #     inv = torch.unique(G, return_inverse=True)[1]
+    #     sorted_inv,index = torch.sort(inv)
+    #     A_sorted = A[index]
+    #     A_sorted_cumprod = torch.cumprod(A_sorted,dim=0)
+    #     A_sorted_grouped_prod = torch_scatter.scatter_mul(A_sorted ,sorted_inv,dim=0)
+    #     cumprod_max = torch_scatter.scatter_min(A_sorted_cumprod,sorted_inv,dim=0) / A_sorted_grouped_prod
+    #     count = torch_scatter.scatter_add(torch.ones_like(sorted_inv,device="cuda",dtype=torch.float32), sorted_inv)
+    #     cumprod_max_interleave = torch.repeat_interleave(cumprod_max, count, dim=0)
+    #     return (A_sorted_cumprod / cumprod_max_interleave)[torch.argsort(index)]
         
     
     # def grouped_cumprod(A,G, G_unique = False):#G_uniqueはkeys = G[:,0] * (MAX_VAL + 1) + G[:,1]で変換

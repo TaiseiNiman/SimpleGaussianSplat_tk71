@@ -444,7 +444,42 @@ class GS_model_with_param(_GS_model):
         return (self.cuda_kernel.grouped_cumprod(unti_opacity[pixel_index],pixel_index_tensor)[torch.argsort(pixel_index)] / unti_opacity)
 
 
+#forwardメソッドでピクセル座標系におけるガウス位置,精度行列,不透明度、放射輝度から画像テンソルを出力し、backwardでその勾配を計算する
 class custom_autograd_grouped_cumprod(torch.autograd.Function):
+    #rectsを計算する
+    @staticmethod
+    def _create_rects(startpoint,endpoint):
+        return Utilities.make_rect_points_parallel(startpoint, endpoint).to(torch.int32)
+    #boxcopyを計算する
+    @staticmethod
+    def _create_boxcopy(boxsize,*tensors):
+        output = []
+        for tensor in tensors:
+            output.append(torch.repeat_interleave(tensor, boxsize, dim=0))
+        return output
+    #ガウスカーネルを計算する:
+    @staticmethod
+    def _create_gause_kernel(rects,mean,variance_inverse):
+        return torch.exp(-0.5 * (rects.to(torch.float32) - mean)[:,None,:] @ variance_inverse @ (rects.to(torch.float32) - mean)[:,:,None])
+    #テンソルをソートする:
+    @staticmethod
+    def _sort_tensor(index,*tensors):
+        output = []
+        for tensor in tensors:
+            output.append(tensor[index])
+        return output
+    #アルファブレンドTを計算する:
+    @staticmethod
+    def _create_alpha_brend():
+    
+    #各キーのアルファブレンドの最大値とキーを返す.
+    @staticmethod
+    def _create_alpha_brend():
+    
+    #アルファブレンドを追加する.
+    @staticmethod
+    def _cat_alpha_brend():
+    
     @staticmethod
     def forward(ctx, unti_opacity_sorted, pixel_index, box_startpoint,box_endpoint,boxsize,mean,opacity,variance_inverse,pixel_max=None,anti_opacity_max=None):
         #結果配列

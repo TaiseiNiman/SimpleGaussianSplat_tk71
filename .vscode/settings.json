@@ -1,4 +1,4 @@
-{
+{   "markdown-preview-enhanced.enableMermaid": false,
     "files.associations": {
         ".fantomasignore": "ignore",
         "array": "cpp",

@@ -298,11 +298,7 @@ class GS_model_with_param(_GS_model):
         Utilities.gpu_mem()
         pixel_image_batch =[]
         for batch_i in range(shape_image):
-            #
-            pixel_gausian_batch = []
-            anti_opacity_max = []
-            pixel_keys_max = []
-            index = 0
+
             #ガウシアンボックス幅が０となるガウシアンを取り除く
             boxsize_mask = (gausian_boxsize_zsort[batch_i, :, 0] != 0) & (mean_pixel_zsort[batch_i,:,0] - gausian_boxsize_zsort[batch_i, :, 0] < shape_width) & (mean_pixel_zsort[batch_i,:,0] + gausian_boxsize_zsort[batch_i, :, 0] > 0) & (mean_pixel_zsort[batch_i,:,1] - gausian_boxsize_zsort[batch_i, :, 1] < shape_height) & (mean_pixel_zsort[batch_i,:,1] + gausian_boxsize_zsort[batch_i, :, 1] > 0)  
             gausian_boxsize_wh = gausian_boxsize_zsort[batch_i,:,:][boxsize_mask]
@@ -333,101 +329,11 @@ class GS_model_with_param(_GS_model):
             # 理由：variance_pixelは線形一次近似であって,ガウス中心に対して十分近傍なピクセル値に対してしか有効でないはずだからである.
             # 具体的に画像に対して何パーセントとすべきかは、これ自体をハイパーパラメータとして学習するか公式の実装コードを読み解くしかない.
             
+            #画像作成
+            pixel_image_batch.append(custom_autograd_grouped_cumprod.apply(gausian_boxsize_batch, gausian_batch, box_startpoint, box_endpoint, mean_pixel_batch, variance_inverse_batch, opacity_batch, L_d_batch,shape_width,shape_height))
             
-            
-            for i in range(len(gausian_batch)):
-                # index = start/2
-                start = gausian_batch[i-1].item() if i != 0 else 0
-                end = gausian_batch[i]
-                rects = Utilities.make_rect_points_parallel(box_startpoint[start:end,:], box_endpoint[start:end,:]).to(torch.int32)
-                torch.cuda.empty_cache()
-                Utilities.gpu_mem()
-                print(f"box_startpoint_int.shape = {box_startpoint[start:end,:].shape}")
-                print(f"box_endpoint_int.shape = {box_endpoint[start:end,:].shape}")
-                #ボックスコピー
-                mean_pixel_batch_boxcopy,L_d_boxcopy,opacity_boxcopy,variance_inverse_boxcopy = self.boxcopy(gausian_boxsize_batch[start:end],mean_pixel_batch[start:end,:].to(torch.float32),L_d_batch[start:end,:],opacity_batch[start:end,:],variance_inverse_batch[start:end,:])
-                Gaus_karnel = torch.exp(-0.5 * (rects.to(torch.float32) - mean_pixel_batch_boxcopy)[:,None,:] @ variance_inverse_boxcopy @ (rects.to(torch.float32) - mean_pixel_batch_boxcopy)[:,:,None])
-                torch.cuda.empty_cache()
-                Utilities.gpu_mem()
-                # self.cuda_kernel.cuda_kernel.grouped_cumprod()
-                if(len(pixel_keys_max) > 0):
-                    #
-                    
-                    #
-                    unique_keys, inv = torch.unique(torch.cat((pixel_keys_max[-1],rects),dim=0),dim=0, return_inverse=True)
-                    #ソート
-                    pixel_index_tensor,pixel_index = torch.sort(inv)
-                    #
-                    unti_opacity = torch.cat((anti_opacity_max[-1],(1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1))),dim=0).clamp(min=1e-8)[pixel_index]
-                    T_0_r_nosorted = custom_autograd_grouped_cumprod.apply(unti_opacity,pixel_index_tensor,box_startpoint[start:end,:],box_endpoint[start:end,:],gausian_boxsize_batch[start:end],mean_pixel_batch[start:end,:].to(torch.float32),opacity_batch[start:end,:],variance_inverse_batch[start:end,:],pixel_keys_max[-1],anti_opacity_max[-1])
-                    argsorted_index = torch.argsort(pixel_index)
-                    T_0_r = T_0_r_nosorted[argsorted_index] 
-                    T_0_r_nosorted = None
-                    anti_opacity_max.append(torch.zeros_like(unique_keys[:,0],device="cuda",dtype=torch.float32).scatter_reduce(0, inv, T_0_r, reduce="amin", include_self=False))
-                    pixel_keys_max.append(unique_keys)
-                    anti_opacity_max[-2] = 0
-                    pixel_keys_max[-2] = 0
-                    T_0 = (T_0_r / unti_opacity[argsorted_index])[len(pixel_keys_max[-1]):]
-                    T_0_r = None
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    
-                else:
-                    
-                    unique_keys, inv = torch.unique(rects,dim=0, return_inverse=True)
-                    #ソート
-                    pixel_index_tensor,pixel_index = torch.sort(inv)
-                    unti_opacity = (1 - opacity_boxcopy.reshape(-1) * Gaus_karnel.reshape(-1)).clamp(min=1e-8)[pixel_index]
-                    T_0_r_nosorted = custom_autograd_grouped_cumprod.apply(unti_opacity,pixel_index_tensor,box_startpoint[start:end,:],box_endpoint[start:end,:],gausian_boxsize_batch[start:end],mean_pixel_batch[start:end,:].to(torch.float32),opacity_batch[start:end,:],variance_inverse_batch[start:end,:])
-                    # loss = torch.sum((T_0_r_nosorted**2 / 2),dim=0)
-                    # self.backward(loss)
-                    argsorted_index = torch.argsort(pixel_index)
-                    T_0_r = T_0_r_nosorted[argsorted_index] 
-                    T_0_r_nosorted = None
-                    anti_opacity_max.append(torch.zeros_like(unique_keys[:,0],device="cuda",dtype=torch.float32).scatter_reduce(0, inv, T_0_r, reduce="amin", include_self=False))
-                    pixel_keys_max.append(unique_keys)
-                    T_0 = T_0_r / unti_opacity[argsorted_index]
-                    T_0_r = None
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                
-                
-  
-                Utilities.gpu_mem()
-                pixel_batch = T_0[:,None] * L_d_boxcopy * opacity_boxcopy * Gaus_karnel.reshape(-1,1) 
-                Utilities.gpu_mem()
-                # (H, W) 行列を作成
-                pixel_batch_sum = torch.zeros((shape_height.to(torch.int32)+1, shape_width.to(torch.int32)+1, 3), dtype=torch.float32,device="cuda")
-                Utilities.gpu_mem()
-
-                # 各座標に A を加算（同じ座標なら合算）
-                pixel_batch_sum.index_put_(
-                    (rects[:, 1].long(), rects[:, 0].long()),
-                    pixel_batch,
-                    accumulate=True
-                )
-                Utilities.gpu_mem()
-                
-                #
-                if(index != 0) :
-                    pixel_gausian_batch.append(pixel_gausian_batch[index-1] + pixel_batch_sum)
-                    #index-1とpixel_batch_sumをnoneにする
-                    pixel_gausian_batch[index-1] = 0
-                    
-                else :
-                    pixel_gausian_batch.append(pixel_batch_sum)
-                    
-                pixel_batch_sum = 0
-                gc.collect()
-                torch.cuda.empty_cache()
-                index += 1
-                print(f"今{batch_i+1}番目の画像のガウシアンバッチ{i+1}枚目が終わりました.")
-            #追加
-            if len(pixel_gausian_batch) > 0:
-                pixel_image_batch.append(pixel_gausian_batch[-1])
-                pixel_gausian_batch[-1] = 0
+            print(f"今{batch_i+1}番目の画像が終わりました.")
         
-        a = 0
         return torch.stack(pixel_image_batch, dim=0)[:,1:,1:,:].reshape(-1,3,shape_height,shape_width)
     
     def boxcopy(self,boxsize,*tensors):
@@ -460,7 +366,23 @@ class custom_autograd_grouped_cumprod(torch.autograd.Function):
     #ガウスカーネルを計算する:
     @staticmethod
     def _create_gause_kernel(rects,mean,variance_inverse):
-        return torch.exp(-0.5 * (rects.to(torch.float32) - mean)[:,None,:] @ variance_inverse @ (rects.to(torch.float32) - mean)[:,:,None])
+        return torch.exp_(-0.5 * (rects.to(torch.float32) - mean)[:,None,:] @ variance_inverse @ (rects.to(torch.float32) - mean)[:,:,None])
+    #ピクセル値を計算する:
+    @staticmethod
+    def _create_pixel(T,l,opacity,gause_kernel):
+        return T[:,None] * l * opacity * gause_kernel.reshape(-1,1) 
+    #画像テンソルの初期化:
+    @staticmethod
+    def _create_zeros_image_tensor(shape_width,shape_height):
+        return torch.zeros((shape_height.to(torch.int32)+1, shape_width.to(torch.int32)+1, 3), dtype=torch.float32,device="cuda")
+    #画像テンソルにピクセル値を追加する:
+    @staticmethod
+    def _update_image_tensor(rects,pixel,output):
+        output.index_put_(
+                    (rects[:, 1].long(), rects[:, 0].long()),
+                    pixel,
+                    accumulate=True
+                )
     #テンソルをソートする:
     @staticmethod
     def _sort_tensor(index,*tensors):
@@ -468,30 +390,207 @@ class custom_autograd_grouped_cumprod(torch.autograd.Function):
         for tensor in tensors:
             output.append(tensor[index])
         return output
+    #テンソルをマスクする:
+    @staticmethod
+    def _mask_tensor(mask,*tensors):
+        output = []
+        for tensor in tensors:
+            output.append(tensor[mask])
+        return output
+    #anti_opacityを計算する:
+    @staticmethod
+    def _create_anti_opacity(opacity,gause_kernel):
+        return (1 - opacity.reshape(-1) * gause_kernel.reshape(-1))
     #アルファブレンドTを計算する:
     @staticmethod
-    def _create_alpha_brend():
-    
-    #各キーのアルファブレンドの最大値とキーを返す.
+    def _create_alpha_brend(rects,anti_opacity,cutting_number):#cutting_numberはアルファブレンドの要素のうちcutting_number:のものを取り除く
+        inv = torch.unique(rects,return_inverse=True,dim=0)[1]
+        sorted_inv, index = torch.sort(inv)
+        sorted_anti_opacity = anti_opacity[index]
+        output = torch.zeros_like(sorted_anti_opacity)
+        grouped_cumprod.grouped_cumprod_forward(sorted_anti_opacity,sorted_inv.to(torch.int32),output)
+        #元の順番に戻す
+        output = output[torch.argsort(index)]
+        #不要な要素を除く
+        if(cutting_number): output = output[cutting_number:]
+        output,mask = custom_autograd_grouped_cumprod._mask_zero_T(output)
+        output = (output / anti_opacity[mask])
+        return [output,mask]
+        
+    #アルファブレンドTとそのrectsを指定の位置で切断する
     @staticmethod
-    def _create_alpha_brend():
-    
-    #アルファブレンドを追加する.
+    def _cutting_alpha_brend(rects,T,cutting_number):
+         return [rects[cutting_number:],T[cutting_number:]]
+    #0の要素を取り除いたTと,そのmaskを返す.
     @staticmethod
-    def _cat_alpha_brend():
+    def _mask_zero_T(T):
+        mask = (T != 0)
+        return [T[mask],mask]
+        
+    #各キーのアルファブレンドの最小値とキーを返す.
+    @staticmethod
+    def _create_alpha_brend_min(rects,T):
+        unique_rects, inv = torch.unique(rects,return_inverse=True,dim=0)
+        T_max = torch.zeros_like(unique_rects[:,0],device=T.device,dtype=torch.float32).scatter_reduce(0, inv, T, reduce="amin", include_self=False)
+        return [unique_rects,T_max]
+    
+    #透明度とそのunique_rectsを追加する.
+    @staticmethod
+    def _cat_alpha_brend(anti_opacity,rects):
+        cat_a = torch.cat((anti_opacity[0],anti_opacity[1]),dim=0)
+        cat_index = torch.cat((rects[0],rects[1]),dim=0)
+        return [cat_a,cat_index]
+    
+    #forwardの各バッチごとの計算
+    @staticmethod
+    def _forward_batch(boxsize, startpoint, endpoint, mean, variance_inverse, opacity, l_d, unique_rects=None, T_min=None):
+        rects = custom_autograd_grouped_cumprod._create_rects(startpoint, endpoint)
+        #ボックスコピー
+        mean_copy,l_copy,opacity_copy,variance_inverse_copy = custom_autograd_grouped_cumprod.boxcopy(boxsize,mean,l_d,opacity,variance_inverse)
+        gause_kernel = custom_autograd_grouped_cumprod._create_gause_kernel(rects,mean_copy,variance_inverse_copy)
+        anti_opacity_copy = custom_autograd_grouped_cumprod._create_anti_opacity(opacity_copy,gause_kernel) 
+        if(unique_rects):
+            T,mask = custom_autograd_grouped_cumprod._create_alpha_brend(rects,anti_opacity_copy)
+            rects = rects[mask]
+            unique_rects, T_min = custom_autograd_grouped_cumprod._create_alpha_brend_min(rects,T)
+        else:
+            cat_anti_opacity, cat_rects = custom_autograd_grouped_cumprod._cat_alpha_brend([T_min,anti_opacity_copy],[unique_rects,rects])
+            T,mask = custom_autograd_grouped_cumprod._create_alpha_brend(cat_rects,cat_anti_opacity,len(unique_rects))
+            rects = rects[mask]
+            cat_anti_opacity, cat_rects = custom_autograd_grouped_cumprod._cat_alpha_brend([T_min,T],[unique_rects,rects])
+            unique_rects, T_min = custom_autograd_grouped_cumprod._create_alpha_brend_min(cat_rects,cat_anti_opacity)
+        #mask
+        mean_copy, l_copy, opacity_copy,gause_kernel = custom_autograd_grouped_cumprod._mask_tensor(mask,mean_copy,l_copy,opacity_copy,gause_kernel)
+        #ピクセル値計算
+        p = custom_autograd_grouped_cumprod._create_pixel(T,l_copy,opacity_copy,gause_kernel)
+        return [rects, p, unique_rects, T_min]
     
     @staticmethod
-    def forward(ctx, unti_opacity_sorted, pixel_index, box_startpoint,box_endpoint,boxsize,mean,opacity,variance_inverse,pixel_max=None,anti_opacity_max=None):
-        #結果配列
-        output = torch.zeros_like(unti_opacity_sorted)
-        #cudaカーネルでグループごとの累積積を計算し,output配列に代入
-        grouped_cumprod.grouped_cumprod_forward(unti_opacity_sorted,pixel_index.to(torch.int32),output)
-        #
-        ctx.save_for_backward(box_startpoint,box_endpoint,boxsize,mean,opacity,variance_inverse,pixel_max,anti_opacity_max)
+    def forward(ctx, boxsize, batch, startpoint, endpoint, mean, variance_inverse, opacity, l_d,image_width,image_height):
+        #画像テンソルの初期化
+        pixel_sum = custom_autograd_grouped_cumprod._create_zeros_image_tensor(image_width,image_height)
+        for i in range(len(batch)):
+            # index = start/2
+            start = batch[i-1].item() if i != 0 else 0
+            end = batch[i]
+            if(unique_rects): rects,p,unique_rects, T_min = custom_autograd_grouped_cumprod._forward_batch(boxsize[start:end],startpoint[start:end,:],endpoint[start:end,:],mean[start:end,:].to(torch.float32),variance_inverse[start:end,:],opacity[start:end,:],l_d[start:end,:],unique_rects,T_min)
+            else: rects,p,unique_rects,T_min = custom_autograd_grouped_cumprod._forward_batch(boxsize[start:end],startpoint[start:end,:],endpoint[start:end,:],mean[start:end,:].to(torch.float32),variance_inverse[start:end,:],opacity[start:end,:],l_d[start:end,:])
+            #画像テンソルにピクセル値を追加
+            custom_autograd_grouped_cumprod._update_image_tensor(rects,p,pixel_sum)
+        
+        #セーブ
+        ctx.save_for_backward(boxsize, batch, startpoint, endpoint, mean, variance_inverse, opacity, l_d, image_width,image_height)
+        return pixel_sum
+    
+    @staticmethod
+    def create_zeros_like_tensor(*tensors):
+        output = []
+        for tensor in tensors:
+            output.append(torch.zeros_like[tensor])
         return output
+    
     @staticmethod
-    def backward(ctx,grad):
-        startpoint,endpoint,boxsize,mean,opacity,variance_inverse,pixel_max,anti_opacity_max = ctx.saved_tensors
+    def insert_pixel_matrix_to_pixel_list(image_matrix,rects):
+        output = torch.zeros_like(rects)
+        output = image_matrix[rects[:, 1].long(), rects[:, 0].long(),:]
+        return output
+    
+    #勾配計算
+    @staticmethod
+    def create_grad(grad,tensor):
+        return grad[:,None,:] @ tensor[:,:,None]
+    
+    #アルファブレンド部分の勾配計算
+    @staticmethod
+    def grad_cumsum(rects,grad,cutting_number=None):
+        rects = rects.flip(0)
+        grad = grad.flip(0)
+        grad.exp_()
+        output,mask = custom_autograd_grouped_cumprod._create_alpha_brend(rects,grad,cutting_number)
+        #logを取り元の順番に戻す
+        output.log_()
+        output = output.flip(0)
+        return [output,mask]
+    
+    #
+    @staticmethod
+    def grad_alphabrend(grad,tensor):
+        
+        return grad[:,None,:] @ tensor[:,:,None]
+    
+    #追加
+    @staticmethod
+    def create_grad_alphabrend_min(rects,grad):
+        index = torch.arange(rects.shape(0),device="cuda",dtype=torch.int32)
+        unique_rects,mask = custom_autograd_grouped_cumprod._create_alpha_brend_min(rects,index)
+        return [unique_rects, grad[mask]]
+    
+    @staticmethod
+    def grad_opacity(grad_cumsum,gause_kernel,anti_opacity,grad,opacity):
+        grad_list = torch.zeros_like(grad_cumsum)
+        grad_list += - (gause_kernel / anti_opacity) * grad_cumsum
+        mask = (opacity != 0) 
+        grad_list[mask] += grad[mask] / opacity[mask]
+        
+        return grad_list
+    
+    @staticmethod
+    def grad_mean(grad_cumsum,gause_kernel,anti_opacity,mean,rects,variance_inverse,grad,opacity):
+        grad_list = torch.zeros_like(grad_cumsum)
+        x = (rects - mean) @ variance_inverse
+        grad_list += ( - ((opacity * gause_kernel) / anti_opacity) * grad_cumsum) * x
+        grad_list += grad * x
+        
+        return grad_list
+    
+    @staticmethod
+    def grad_variance_inverse(grad_cumsum,gause_kernel,anti_opacity,mean,rects,grad,opacity):
+        grad_list = torch.zeros_like(grad_cumsum)
+        x = (rects - mean)[:,:,None] @ (rects - mean)[:,None,:]
+        grad_list += ( 0.5 * ((opacity * gause_kernel) / anti_opacity) * grad_cumsum) * x
+        grad_list += (- 0.5 * grad) *  x
+        
+        return grad_list
+    
+    @staticmethod
+    def grad_l(grad,l):
+        grad_list = torch.zeros_like(grad)
+        mask = (l != 0) 
+        grad_list[mask] += grad[mask] / l[mask]
+        
+        return grad_list
+    
+    @staticmethod
+    def grad_list_to_gause(boxsize,*grad_list):
+        output = []
+        gause_point = torch.arange(len(boxsize),device="cuda",dtype=torch.int32)
+        gause_inv = custom_autograd_grouped_cumprod._create_boxcopy(boxsize,gause_point)
+        for grad in grad_list:
+            output.append(gause_point.scatter_reduce(0,gause_inv,grad,reduce="sum",include_self=False))
+        return output
+    
+    @staticmethod
+    def backward(ctx,pixel_sum_grad):
+        boxsize, batch, startpoint, endpoint, mean, variance_inverse, opacity, l_d, image_width,image_height = ctx.saved_tensors
+        unique_rects_list = []
+        T_min_list = []
+        #unique_rectsとT_minのリストを得る
+        for i in range(len(batch)):
+            # index = start/2
+            start = batch[i-1].item() if i != 0 else 0
+            end = batch[i]
+            if(unique_rects): rects,p,unique_rects, T_min = custom_autograd_grouped_cumprod._forward_batch(boxsize[start:end],startpoint[start:end,:],endpoint[start:end,:],mean[start:end,:].to(torch.float32),variance_inverse[start:end,:],opacity[start:end,:],l_d[start:end,:],unique_rects,T_min)
+            else: rects,p,unique_rects,T_min = custom_autograd_grouped_cumprod._forward_batch(boxsize[start:end],startpoint[start:end,:],endpoint[start:end,:],mean[start:end,:].to(torch.float32),variance_inverse[start:end,:],opacity[start:end,:],l_d[start:end,:])
+            #unique_rectsをアペンドする
+            unique_rects_list.append(unique_rects)
+            T_min_list.append(T_min)
+        #勾配計算
+        for i in torch.arange(len(batch),device="cuda").flip(0):
+            start = batch[i-1].item() if i != 0 else 0
+            end = batch[i]
+            rects,p,unique_rects, T_min = custom_autograd_grouped_cumprod._forward_batch(boxsize[start:end],startpoint[start:end,:],endpoint[start:end,:],mean[start:end,:].to(torch.float32),variance_inverse[start:end,:],opacity[start:end,:],l_d[start:end,:],unique_rects_list[i-1],T_min_list[i-1])
+            
+            
         rects = Utilities.make_rect_points_parallel(startpoint, endpoint).to(torch.int32)
         #ボックスコピー
         mean_pixel_batch_boxcopy,opacity_boxcopy,variance_inverse_boxcopy = boxcopy(boxsize,mean.to(torch.float32),opacity,variance_inverse)

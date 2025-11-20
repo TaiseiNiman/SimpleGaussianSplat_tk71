@@ -11,11 +11,13 @@ void grouped_cumprod_backward(
     torch::Tensor grad_in,
     torch::Tensor inv_len
 );
+void grouped_cumsum_forward(torch::Tensor x, torch::Tensor key, torch::Tensor y);
 
 // PyTorchに登録
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("grouped_cumprod_forward", &grouped_cumprod_forward, "Grouped Cumulative Product (CUDA)");
+    m.def("grouped_cumprod_forward", &grouped_cumprod_forward, "Grouped Cumulative Product (CUDA prod)");
     m.def("grouped_cumprod_backward", &grouped_cumprod_backward,
           "Grouped Cumulative Product (CUDA backward)");
+    m.def("grouped_cumsum_forward", &grouped_cumsum_forward, "Grouped Cumulative Product (CUDA sum)");
 }
 

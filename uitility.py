@@ -270,7 +270,7 @@ class Utilities():
         # 各画像における点群座標 (M,N)
         X = XYZ[..., 0]  # (M,N)
         Y = XYZ[..., 1]
-        Z = XYZ[..., 2].clamp_min(1e-8)  # Z=0除外防止
+        Z = XYZ[..., 2].clamp_min(10**(-2))  # Z=0除外防止
 
         # 出力テンソル確保
         M, N = XYZ.shape[:2]
@@ -439,7 +439,7 @@ class Utilities():
 
         # 単位行列（eps * I）
         I = torch.eye(2, device=A.device, dtype=A.dtype).expand_as(A)
-        A_reg = A + eps * I  # 正則化
+        A_reg = A   # 正則化
 
         # 各成分を取り出し
         a = A_reg[..., 0, 0]

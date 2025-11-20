@@ -10,7 +10,8 @@ setup(
             sources=[
                 'cuda_kernel\\cuda_kernel.cpp',
                 'cuda_kernel\\grouped_cumprod_forward.cu',
-                'cuda_kernel\\grouped_cumprod_backward.cu'
+                'cuda_kernel\\grouped_cumprod_backward.cu',
+                'cuda_kernel\\grouped_cumsum_forward.cu'
             ],
             include_dirs=[
                 os.path.join(cuda_path,"include"),

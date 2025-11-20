@@ -101,7 +101,7 @@ class Control():
                     #パラメーターの勾配計算オン
                     self.GS_model_param.changing_required_grad(True)
                     #ガウシアンスプラッティングによる画像の出力
-                    model_images = self.GS_model_param(it_P,it_K,it_wh)
+                    model_images,it_image_sample = self.GS_model_param(it_P,it_K,it_wh,list(it_image_sample))
                     #画像パスから学習画像をgpuメモリに配置
                     images_tensor = torch.empty((0,3,it_wh[0,1].to(torch.int32).item(),it_wh[0,0].to(torch.int32).item()))
                     for img in it_image_sample:
@@ -116,6 +116,7 @@ class Control():
                     loss = (1-self.loss_lamda) * loss_1 + self.loss_lamda * loss_d_ssim
                     print(f"loss:{loss}")
                     #自動微分による勾配計算
+                    torch.autograd.set_detect_anomaly(True)
                     self.GS_model_param.backward(loss)
                     #ガウス分布の位置の勾配値の積算回数の更新
                     self.GS_model_param.param_iter_update()
@@ -137,8 +138,8 @@ class Control():
                     Utilities.mem_refresh(images_tensor_gpu,False)
                     
                     #レンダリング画像表示
-                    if batch_i + 1 == self.batch_size:
-                       self.vis.update(model_images[0,:,:,:])
+                    # if batch_i + 1 == self.batch_size:
+                    self.vis.update(model_images[batch_i,:,:,:])
                     
 
         except Exception as e:

@@ -2,9 +2,9 @@
 setlocal enabledelayedexpansion
 
 REM ==== 設定 ====
-set "input_folder=C:\Users\tk71\Downloads\gerrard-hall\images"
+set "input_folder=C:\Users\tk71\Downloads\south-building\south-building\images"
 set "output_folder=C:\Users\tk71\Downloads\SimpleGaussianSplat_tk71\colmap\images"
-set "width=640"
+set "width=400"
 REM ==============
 
 if not exist "%output_folder%" (

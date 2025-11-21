@@ -129,7 +129,7 @@ class Utilities():
         # m=l の初期値
         pmm = torch.ones_like(x)
         if m > 0:
-            somx2 = torch.sqrt((1 - x) * (1 + x))
+            somx2 = torch.sqrt(torch.clamp((1 - x) * (1 + x), min=0.0)) + 1e-12
             fact = 1.0
             for i in range(1, m + 1):
                 pmm = -pmm * fact * somx2
@@ -157,7 +157,7 @@ class Utilities():
         """
         K = math.sqrt((2*l + 1) / (4*math.pi) *
                     math.factorial(l - abs(m)) / math.factorial(l + abs(m)))
-        P = Utilities.legendre_P(l, abs(m), torch.cos(theta))
+        P = Utilities.legendre_P(l, abs(m), torch.cos(theta).clamp(-1.0, 1.0))
 
         if m > 0:
             return math.sqrt(2) * K * P * torch.cos(m * phi)
@@ -569,5 +569,40 @@ class Utilities():
             pixel_image_batch.append(pixel_img)
 
         return torch.stack(pixel_image_batch, dim=0)
+    
+    def get_expon_lr_func(
+        lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
+    ):
+        """
+        Copied from Plenoxels
+
+        Continuous learning rate decay function. Adapted from JaxNeRF
+        The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
+        is log-linearly interpolated elsewhere (equivalent to exponential decay).
+        If lr_delay_steps>0 then the learning rate will be scaled by some smooth
+        function of lr_delay_mult, such that the initial learning rate is
+        lr_init*lr_delay_mult at the beginning of optimization but will be eased back
+        to the normal learning rate when steps>lr_delay_steps.
+        :param conf: config subtree 'lr' or similar
+        :param max_steps: int, the number of steps during optimization.
+        :return HoF which takes step as input
+        """
+
+        def helper(step):
+            if step < 0 or (lr_init == 0.0 and lr_final == 0.0):
+                # Disable this parameter
+                return 0.0
+            if lr_delay_steps > 0:
+                # A kind of reverse cosine decay.
+                delay_rate = lr_delay_mult + (1 - lr_delay_mult) * torch.sin(
+                    0.5 * torch.pi * torch.clip(step / lr_delay_steps, 0, 1)
+                )
+            else:
+                delay_rate = 1.0
+            t = torch.clip(step / max_steps, 0, 1)
+            log_lerp = torch.exp(torch.log(lr_init) * (1 - t) + torch.log(lr_final) * t)
+            return delay_rate * log_lerp
+
+        return helper
 
    

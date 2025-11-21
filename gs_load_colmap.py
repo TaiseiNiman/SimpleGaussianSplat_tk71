@@ -11,7 +11,7 @@ class Image_to_transform():
             full_path = os.path.join(root_dir, "images", path)
             # 画像を読み込み
             self.img = Image.open(full_path)
-            print(f"画像 ({path}) の読み込みに成功しました.")
+            # print(f"画像 ({path}) の読み込みに成功しました.")
             
         except Exception as e:
             print(f"画像 {path} の処理中にエラーが発生しました: {e}")  
